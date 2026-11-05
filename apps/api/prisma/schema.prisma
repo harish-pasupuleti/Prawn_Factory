@@ -1,0 +1,559 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  FARMER
+  PURCHASE_MANAGER
+  FIELD_OFFICER
+  TRANSPORT_OFFICER
+  SECURITY_OFFICER
+  FACTORY_OPERATOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ProcurementStatus {
+  SUBMITTED
+  CLARIFICATION_REQUESTED
+  APPROVED
+  REJECTED
+  CANCELLED
+  INSPECTION_ASSIGNED
+  INSPECTION_PASSED
+  INSPECTION_FAILED
+  INSPECTION_REVIEW
+  TRANSPORT_ASSIGNED
+  IN_TRANSIT
+  DELIVERED
+  RECEIVED
+}
+
+enum InspectionStatus {
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum InspectionOutcome {
+  PASS
+  FAIL
+  REVIEW
+}
+
+enum InspectionDecisionKind {
+  PROCEED
+  REJECT
+  REINSPECT
+}
+
+enum CollectionStatus {
+  ASSIGNED
+  PICKED_UP
+  LOADED
+  DISPATCHED
+  ARRIVED
+  HANDED_OVER
+  CANCELLED
+}
+
+enum IncidentType {
+  DELAY
+  DAMAGE
+  QUANTITY_SHORTFALL
+  VEHICLE_BREAKDOWN
+  OTHER
+}
+
+enum BookingStatus {
+  RESERVED
+  CHECKED_IN
+  COMPLETED
+  CANCELLED
+  RESCHEDULED
+  NO_SHOW
+}
+
+enum ShipmentStatus {
+  EXPECTED
+  ADMITTED
+  RECEIVED
+  RELEASED
+}
+
+enum GateEventType {
+  ARRIVED
+  VERIFIED
+  HELD
+  HOLD_RELEASED
+  REJECTED
+  OVERRIDE
+  ADMITTED
+  EXITED
+}
+
+enum WeightKind {
+  GROSS
+  TARE
+}
+
+enum ExceptionType {
+  RECEPTION_DISCREPANCY
+  GATE_REJECTION
+}
+
+enum ExceptionStatus {
+  OPEN
+  RESOLVED
+}
+
+enum ExceptionEventType {
+  RAISED
+  NOTE
+  RESOLVED
+}
+
+enum QueueStatus {
+  QUEUED
+  IN_PROGRESS
+  COMPLETED
+}
+
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  email            String    @unique
+  passwordHash     String
+  fullName         String
+  role             Role
+  status           UserStatus @default(ACTIVE)
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  farmerProfile    FarmerProfile?
+  sessions         RefreshSession[]
+  statusChanges    ProcurementRequest[]   @relation("RequestStatusChangedBy")
+  amendments       ProcurementAmendment[]
+  auditEvents      AuditEvent[]
+
+  inspectionsAssigned  FieldInspection[]      @relation("InspectionOfficer")
+  inspectionsCreated   FieldInspection[]      @relation("InspectionAssigner")
+  inspectionDecisions  InspectionDecision[]
+  collectionsAsOfficer CollectionJob[]        @relation("CollectionOfficer")
+  collectionsCreated   CollectionJob[]        @relation("CollectionAssigner")
+  incidentsReported    CollectionIncident[]
+  slotsCreated         FactorySlot[]
+  bookingsReserved     SlotBooking[]
+  gateEvents           GateEvent[]
+  weightsRecorded      WeightMeasurement[]
+  shipmentsReceived    Shipment[]            @relation("ShipmentReceiver")
+  exceptionsRaised     ExceptionCase[]       @relation("ExceptionRaiser")
+  exceptionsResolved   ExceptionCase[]       @relation("ExceptionResolver")
+  exceptionEvents      ExceptionEvent[]
+  queueReleased        QueueEntry[]          @relation("QueueReleaser")
+  queueStarted         QueueEntry[]          @relation("QueueStarter")
+  queueCompleted       QueueEntry[]          @relation("QueueCompleter")
+
+  @@index([role, status])
+}
+
+model FarmerProfile {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @db.Uuid
+  phone     String
+  village   String
+  district  String
+  state     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  requests  ProcurementRequest[]
+}
+
+model RefreshSession {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+}
+
+// The declared* columns hold the ORIGINAL farmer declaration and are never updated.
+// Corrections are rows in ProcurementAmendment; the "current" view is derived.
+model ProcurementRequest {
+  id                    String            @id @default(uuid()) @db.Uuid
+  code                  String            @unique
+  farmerId              String            @db.Uuid
+  species               String
+  declaredSizeCount     String
+  declaredQuantityKg    Decimal           @db.Decimal(12, 3)
+  expectedPriceInrPerKg Decimal           @db.Decimal(12, 2)
+  availabilityDate      DateTime          @db.Date
+  notes                 String?
+  status                ProcurementStatus @default(SUBMITTED)
+  statusReason          String?
+  statusChangedById     String?           @db.Uuid
+  statusChangedAt       DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  farmer          FarmerProfile          @relation(fields: [farmerId], references: [id], onDelete: Restrict)
+  statusChangedBy User?                  @relation("RequestStatusChangedBy", fields: [statusChangedById], references: [id], onDelete: Restrict)
+  amendments      ProcurementAmendment[]
+  inspections         FieldInspection[]
+  inspectionDecisions InspectionDecision[]
+  collections         CollectionJob[]
+  shipments           Shipment[]
+  exceptions          ExceptionCase[]
+
+  @@index([farmerId, createdAt])
+  @@index([status, createdAt])
+}
+
+model ProcurementAmendment {
+  id        String   @id @default(uuid()) @db.Uuid
+  seq       Int      @default(autoincrement())
+  requestId String   @db.Uuid
+  field     String
+  oldValue  String
+  newValue  String
+  reason    String
+  actorId   String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  request   ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  actor     User               @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([requestId, seq])
+}
+
+// Insert-only. A database trigger (see migration) rejects UPDATE and DELETE.
+model AuditEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @db.Uuid
+  action     String
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+model Vehicle {
+  id                 String   @id @default(uuid()) @db.Uuid
+  registrationNumber String   @unique
+  description        String?
+  capacityKg         Decimal  @db.Decimal(12, 3)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  collections        CollectionJob[]
+}
+
+// One row per inspection attempt. inspectedQuantityKg is separate from the farmer's declared quantity
+// and from the collected quantity; none of the three is ever overwritten by another.
+model FieldInspection {
+  id                             String            @id @default(uuid()) @db.Uuid
+  requestId                      String            @db.Uuid
+  officerId                      String            @db.Uuid
+  assignedById                   String            @db.Uuid
+  status                         InspectionStatus  @default(ASSIGNED)
+  assignedAt                     DateTime          @default(now())
+  startedAt                      DateTime?
+  completedAt                    DateTime?
+  outcome                        InspectionOutcome?
+  observedSpecies                String?
+  observedSizeCount              String?
+  inspectedQuantityKg            Decimal?          @db.Decimal(12, 3)
+  declaredQuantityKgAtInspection Decimal?          @db.Decimal(12, 3)
+  quantityVariancePct            Decimal?          @db.Decimal(12, 2)
+  qualityNotes                   String?
+  discrepancyNotes               String?
+  cancelReason                   String?
+  createdAt                      DateTime          @default(now())
+  updatedAt                      DateTime          @updatedAt
+
+  request     ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  officer     User               @relation("InspectionOfficer", fields: [officerId], references: [id], onDelete: Restrict)
+  assignedBy  User               @relation("InspectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
+  decision    InspectionDecision?
+
+  @@index([requestId, createdAt])
+  @@index([officerId, status])
+  @@index([status, createdAt])
+}
+
+// Insert-only record of a Purchase Manager's decision on a FAIL or REVIEW inspection. One per inspection.
+model InspectionDecision {
+  id           String                 @id @default(uuid()) @db.Uuid
+  requestId    String                 @db.Uuid
+  inspectionId String                 @unique @db.Uuid
+  kind         InspectionDecisionKind
+  reason       String
+  decidedById  String                 @db.Uuid
+  createdAt    DateTime               @default(now())
+
+  request      ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  inspection   FieldInspection    @relation(fields: [inspectionId], references: [id], onDelete: Restrict)
+  decidedBy    User               @relation(fields: [decidedById], references: [id], onDelete: Restrict)
+
+  @@index([requestId])
+}
+
+model CollectionJob {
+  id                  String           @id @default(uuid()) @db.Uuid
+  requestId           String           @db.Uuid
+  transportOfficerId  String           @db.Uuid
+  vehicleId           String           @db.Uuid
+  assignedById        String           @db.Uuid
+  status              CollectionStatus @default(ASSIGNED)
+  assignedAt          DateTime         @default(now())
+  scheduledPickupAt   DateTime?
+  expectedArrivalAt   DateTime?
+  pickedUpAt          DateTime?
+  loadedAt            DateTime?
+  collectedQuantityKg Decimal?         @db.Decimal(12, 3)
+  collectionNotes     String?
+  dispatchedAt        DateTime?
+  arrivedAt           DateTime?
+  handedOverAt        DateTime?
+  handoverNotes       String?
+  cancelReason        String?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  request           ProcurementRequest   @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  transportOfficer  User                 @relation("CollectionOfficer", fields: [transportOfficerId], references: [id], onDelete: Restrict)
+  assignedBy        User                 @relation("CollectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
+  vehicle           Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  incidents         CollectionIncident[]
+  shipment          Shipment?
+
+  @@index([requestId, createdAt])
+  @@index([transportOfficerId, status])
+  @@index([vehicleId, status])
+  @@index([status, createdAt])
+}
+
+// Insert-only (database trigger).
+model CollectionIncident {
+  id                 String       @id @default(uuid()) @db.Uuid
+  collectionJobId    String       @db.Uuid
+  reporterId         String       @db.Uuid
+  type               IncidentType
+  description        String
+  quantityAffectedKg Decimal?     @db.Decimal(12, 3)
+  createdAt          DateTime     @default(now())
+
+  collectionJob      CollectionJob @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
+  reporter           User          @relation(fields: [reporterId], references: [id], onDelete: Restrict)
+
+  @@index([collectionJobId, createdAt])
+}
+
+model FactorySlot {
+  id          String   @id @default(uuid()) @db.Uuid
+  startsAt    DateTime
+  endsAt      DateTime
+  capacity    Int
+  isActive    Boolean  @default(true)
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  bookings    SlotBooking[]
+
+  @@unique([startsAt, endsAt])
+  @@index([startsAt])
+}
+
+// One shipment per collection job. Its human-readable code (SH-YYYY-000001) is the identifier used at the gate and on the factory floor.
+model Shipment {
+  id                 String         @id @default(uuid()) @db.Uuid
+  code               String         @unique
+  requestId          String         @db.Uuid
+  collectionJobId    String         @unique @db.Uuid
+  status             ShipmentStatus @default(EXPECTED)
+  // Snapshots derived from the append-only WeightMeasurement rows (net = gross - tare).
+  netWeightKg        Decimal?       @db.Decimal(12, 3)
+  receivedQuantityKg Decimal?       @db.Decimal(12, 3)
+  receivedAt         DateTime?
+  receivedById       String?        @db.Uuid
+  releasedAt         DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  request       ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  collectionJob CollectionJob      @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
+  receivedBy    User?              @relation("ShipmentReceiver", fields: [receivedById], references: [id], onDelete: Restrict)
+  bookings      SlotBooking[]
+  gateEvents    GateEvent[]
+  weights       WeightMeasurement[]
+  exceptions    ExceptionCase[]
+  queueEntry    QueueEntry?
+
+  @@index([requestId])
+  @@index([status])
+}
+
+model SlotBooking {
+  id                 String        @id @default(uuid()) @db.Uuid
+  shipmentId         String        @db.Uuid
+  slotId             String        @db.Uuid
+  status             BookingStatus @default(RESERVED)
+  reservedById       String        @db.Uuid
+  reason             String?
+  rescheduledFromId  String?       @db.Uuid
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  shipment    Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  slot        FactorySlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
+  reservedBy  User        @relation(fields: [reservedById], references: [id], onDelete: Restrict)
+  gateEvents  GateEvent[]
+
+  @@index([slotId, status])
+  @@index([shipmentId, createdAt])
+}
+
+// Insert-only (database trigger).
+model GateEvent {
+  id         String        @id @default(uuid()) @db.Uuid
+  shipmentId String        @db.Uuid
+  bookingId  String        @db.Uuid
+  type       GateEventType
+  actorId    String        @db.Uuid
+  reason     String?
+  createdAt  DateTime      @default(now())
+
+  shipment   Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  booking    SlotBooking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  actor      User        @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([shipmentId, createdAt])
+  @@index([bookingId])
+}
+
+// Insert-only (database trigger). A correction is a NEW row whose supersedesId points at the row it replaces,
+// so the original value, the reason, the user and the time are always preserved.
+model WeightMeasurement {
+  id           String     @id @default(uuid()) @db.Uuid
+  shipmentId   String     @db.Uuid
+  kind         WeightKind
+  valueKg      Decimal    @db.Decimal(12, 3)
+  recordedById String     @db.Uuid
+  supersedesId String?    @unique @db.Uuid
+  reason       String?
+  createdAt    DateTime   @default(now())
+
+  shipment     Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  recordedBy   User               @relation(fields: [recordedById], references: [id], onDelete: Restrict)
+  supersedes   WeightMeasurement? @relation("Supersession", fields: [supersedesId], references: [id], onDelete: Restrict)
+  supersededBy WeightMeasurement? @relation("Supersession")
+
+  @@index([shipmentId, kind])
+}
+
+model ExceptionCase {
+  id           String          @id @default(uuid()) @db.Uuid
+  type         ExceptionType
+  status       ExceptionStatus @default(OPEN)
+  shipmentId   String          @db.Uuid
+  requestId    String          @db.Uuid
+  summary      String
+  details      Json?
+  raisedById   String          @db.Uuid
+  resolvedById String?         @db.Uuid
+  resolvedAt   DateTime?
+  resolution   String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  shipment     Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  request      ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  raisedBy     User               @relation("ExceptionRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  resolvedBy   User?              @relation("ExceptionResolver", fields: [resolvedById], references: [id], onDelete: Restrict)
+  events       ExceptionEvent[]
+
+  @@index([status, createdAt])
+  @@index([shipmentId])
+}
+
+// Insert-only (database trigger): the full history of an exception.
+model ExceptionEvent {
+  id          String             @id @default(uuid()) @db.Uuid
+  exceptionId String             @db.Uuid
+  type        ExceptionEventType
+  actorId     String             @db.Uuid
+  note        String
+  createdAt   DateTime           @default(now())
+
+  exception   ExceptionCase @relation(fields: [exceptionId], references: [id], onDelete: Restrict)
+  actor       User          @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([exceptionId, createdAt])
+}
+
+model ProcessingStation {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries   QueueEntry[]
+}
+
+// Timers are NOT stored. They are computed from startedAt and targetDurationMin using server time,
+// so they stay correct after a refresh or reconnect. Reaching zero never completes an entry.
+model QueueEntry {
+  id                String      @id @default(uuid()) @db.Uuid
+  shipmentId        String      @unique @db.Uuid
+  status            QueueStatus @default(QUEUED)
+  stationId         String?     @db.Uuid
+  targetDurationMin Int
+  releasedById      String      @db.Uuid
+  startedById       String?     @db.Uuid
+  startedAt         DateTime?
+  completedById     String?     @db.Uuid
+  completedAt       DateTime?
+  notes             String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  shipment    Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  station     ProcessingStation? @relation(fields: [stationId], references: [id], onDelete: Restrict)
+  releasedBy  User               @relation("QueueReleaser", fields: [releasedById], references: [id], onDelete: Restrict)
+  startedBy   User?              @relation("QueueStarter", fields: [startedById], references: [id], onDelete: Restrict)
+  completedBy User?              @relation("QueueCompleter", fields: [completedById], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+}

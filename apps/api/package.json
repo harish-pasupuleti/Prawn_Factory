@@ -1,0 +1,50 @@
+{
+  "name": "@prawn/api",
+  "version": "0.1.0",
+  "description": "Prawn Factory Management System - API",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "pretest": "node scripts/assert-test-db.mjs && dotenv -e .env.test -- prisma migrate reset --force --skip-seed --skip-generate",
+    "test": "vitest run",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "prisma db seed",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "argon2": "0.45.1",
+    "compression": "^1.8.1",
+    "cookie-parser": "1.4.7",
+    "cors": "2.8.6",
+    "dotenv": "18.0.8",
+    "express": "5.3.0",
+    "express-rate-limit": "8.7.1",
+    "helmet": "8.3.0",
+    "jsonwebtoken": "9.0.3",
+    "pino": "10.4.0",
+    "pino-http": "11.0.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.8.1",
+    "@types/cookie-parser": "1.4.10",
+    "@types/cors": "2.8.19",
+    "@types/express": "5.0.6",
+    "@types/jsonwebtoken": "9.0.10",
+    "@types/node": "22.20.5",
+    "@types/supertest": "7.2.1",
+    "dotenv-cli": "11.0.0",
+    "prisma": "6.19.3",
+    "supertest": "7.3.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  },
+  "private": true
+}

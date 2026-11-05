@@ -1,0 +1,23 @@
+{
+  "name": "prawn-factory",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "api:dev": "npm run dev -w @prawn/api",
+    "web:dev": "npm run dev -w @prawn/web",
+    "api:test": "npm run test -w @prawn/api",
+    "web:test": "npm run test -w @prawn/web",
+    "api:build": "npm run build -w @prawn/api",
+    "web:build": "npm run build -w @prawn/web",
+    "typecheck": "npm run typecheck -w @prawn/api && npm run typecheck -w @prawn/web"
+  },
+  "overrides": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
