@@ -4,6 +4,7 @@ import { useForm } from 'react-hook-form';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { z } from 'zod';
 import { useAuth } from '../auth/AuthContext';
+import { FieldEvidence } from '../components/FieldEvidence';
 import { ReasonDialog } from '../components/ReasonDialog';
 import { Alert, Button, Card, Dialog, EmptyState, PageHeader, Pagination, Pill, SelectField, Spinner, TextAreaField, TextField } from '../components/ui';
 import {
@@ -36,6 +37,7 @@ export function CollectionsPage() {
   const status = (STATUSES as string[]).includes(statusParam ?? '') ? (statusParam as CollectionStatus) : '';
   const result = useCollections({ page, pageSize: 10, status });
   const mine = user?.role === 'TRANSPORT_OFFICER';
+  const fieldOfficer = user?.role === 'FIELD_OFFICER';
 
   const update = (patch: Record<string, string | undefined>, resetPage = true) => {
     const next = new URLSearchParams(params);
@@ -46,7 +48,7 @@ export function CollectionsPage() {
 
   return (
     <>
-      <PageHeader title={mine ? 'My collections' : 'Collection jobs'} description={mine ? 'Pickups assigned to you.' : 'All transport assignments and their progress.'} />
+      <PageHeader title={mine ? 'My collections' : fieldOfficer ? 'Collections to attend' : 'Collection jobs'} description={mine ? 'Pickups assigned to you.' : fieldOfficer ? 'Pickups for requests you inspected. Go with the transport officer, photograph the load and seal it.' : 'All transport assignments and their progress.'} />
       <Card className="mb-4">
         <div className="max-w-xs">
           <SelectField label="Status" value={status} onChange={(e) => update({ status: e.target.value || undefined })}>
@@ -63,7 +65,7 @@ export function CollectionsPage() {
       ) : result.isError ? (
         <Alert tone="error">{errorMessage(result.error, 'Could not load collections.')}</Alert>
       ) : result.data!.items.length === 0 ? (
-        <EmptyState title="No collection jobs match">{mine ? 'New assignments will appear here.' : 'Assign transport from a request whose inspection passed.'}</EmptyState>
+        <EmptyState title="No collection jobs match">{mine ? 'New assignments will appear here.' : fieldOfficer ? 'Once transport is assigned to a request you passed, it appears here.' : 'Assign transport from a request whose inspection passed.'}</EmptyState>
       ) : (
         <>
           <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -300,7 +302,7 @@ export function CollectionDetailPage() {
             <h2 className="mb-3 text-base font-semibold">Next step</h2>
             {next === 'pickup' && <SimpleStep label="Confirm pickup" description="Confirm you have arrived at the farm and started collecting. The time is recorded by the server." run={() => pickup.mutateAsync(undefined)} pending={pickup.isPending} />}
             {next === 'load' && <LoadForm collection={c} />}
-            {next === 'dispatch' && <DispatchForm collection={c} />}
+            {next === 'dispatch' && (c.sealed ? <DispatchForm collection={c} /> : <Alert tone="info">Waiting for the field officer to photograph and seal the load. You can dispatch once it is sealed.</Alert>)}
             {next === 'arrive' && <SimpleStep label="Mark arrived at factory" description="Confirm the vehicle has reached the factory gate." run={() => arrive.mutateAsync(undefined)} pending={arrive.isPending} />}
             {next === 'handover' && (
               <SimpleStep label="Record handover" description="Confirm the consignment has been handed over to factory staff. This completes your job." run={() => handover.mutateAsync(handoverNote.trim() ? { notes: handoverNote.trim() } : {})} pending={handover.isPending}>
@@ -309,6 +311,8 @@ export function CollectionDetailPage() {
             )}
           </Card>
         )}
+
+        <FieldEvidence collection={c} role={user?.role ?? ''} />
 
         <Card>
           <div className="mb-3 flex items-center justify-between">

@@ -48,7 +48,13 @@ export const rescheduleBookingSchema = z.object({ slotId: uuid('a slot'), reason
 export const reasonOnlySchema = z.object({ reason }).strict();
 export const optionalReasonSchema = z.object({ reason: z.string().trim().max(500).optional() }).strict();
 export const emptyBodySchema = z.object({}).strict();
-export const verifySchema = z.object({ registrationNumber: z.string().trim().min(2, 'Enter the vehicle registration').max(20) }).strict();
+export const verifySchema = z
+  .object({
+    registrationNumber: z.string().trim().min(2, 'Enter the vehicle registration').max(20),
+    // Typed by the security officer from the physical seal; compared on the server, never sent to the browser.
+    sealCode: z.string().trim().max(20).optional(),
+  })
+  .strict();
 
 export const listBookingsQuerySchema = paginationSchema.extend({
   status: z.enum(BOOKING_STATUS_VALUES).optional(),

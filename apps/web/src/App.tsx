@@ -38,7 +38,7 @@ export function App() {
             <Route path="inspections" element={<InspectionsPage />} />
             <Route path="inspections/:id" element={<InspectionDetailPage />} />
           </Route>
-          <Route element={<RequireAuth roles={['TRANSPORT_OFFICER', 'PURCHASE_MANAGER', 'ADMIN']} />}>
+          <Route element={<RequireAuth roles={['TRANSPORT_OFFICER', 'FIELD_OFFICER', 'PURCHASE_MANAGER', 'ADMIN']} />}>
             <Route path="collections" element={<CollectionsPage />} />
             <Route path="collections/:id" element={<CollectionDetailPage />} />
           </Route>

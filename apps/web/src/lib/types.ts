@@ -178,6 +178,15 @@ export interface Incident {
   at: string;
 }
 
+export interface CollectionPhoto {
+  id: string;
+  caption: string | null;
+  sizeBytes: number;
+  mimeType: string;
+  by: string;
+  at: string;
+}
+
 export interface Collection {
   id: string;
   status: CollectionStatus;
@@ -196,6 +205,12 @@ export interface Collection {
   handedOverAt: string | null;
   handoverNotes: string | null;
   cancelReason: string | null;
+  photos: CollectionPhoto[];
+  sealed: boolean;
+  sealedAt: string | null;
+  sealedBy: string | null;
+  /** Only returned to the field officer and the purchase manager. */
+  sealCode: string | null;
   overdue: boolean;
   arrivedLate: boolean | null;
   incidents: Incident[];
@@ -364,6 +379,8 @@ export interface Booking {
   shipment: { id: string; code: string; status: ShipmentStatus };
   vehicleRegistration: string;
   driverName: string;
+  /** True when the load was sealed at the farm, so the gate must type the seal code. The code itself is never sent. */
+  sealRequired: boolean;
   gate: GateStateView;
   weighed: boolean;
   actions: GateAction[];

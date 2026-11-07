@@ -31,7 +31,7 @@ export function collectionFixture(status: CollectionStatus, overrides: Partial<C
     transportOfficer: { name: 'Driver One' },
     assignedAt: '2026-10-20T05:00:00.000Z', scheduledPickupAt: null, expectedArrivalAt: '2026-10-22T15:00:00.000Z',
     pickedUpAt: null, loadedAt: null, collectedQuantityKg: null, collectionNotes: null, dispatchedAt: null,
-    arrivedAt: null, handedOverAt: null, handoverNotes: null, cancelReason: null, overdue: false, arrivedLate: null, incidents: [], shipment: null,
+    arrivedAt: null, handedOverAt: null, handoverNotes: null, cancelReason: null, photos: [], sealed: false, sealedAt: null, sealedBy: null, sealCode: null, overdue: false, arrivedLate: null, incidents: [], shipment: null,
     ...overrides,
   };
 }
@@ -53,7 +53,7 @@ export const minutes = (n: number) => n * 60_000;
 export function bookingFixture(overrides: Partial<Booking> = {}): Booking {
   return {
     id: 'b1', status: 'RESERVED', slot: { id: 's1', startsAt: iso(minutes(30)), endsAt: iso(minutes(210)) }, window: 'IN_WINDOW',
-    shipment: { id: 'sh1', code: 'SH-2026-000001', status: 'EXPECTED' }, vehicleRegistration: 'AP31TX1234', driverName: 'Driver One',
+    shipment: { id: 'sh1', code: 'SH-2026-000001', status: 'EXPECTED' }, vehicleRegistration: 'AP31TX1234', driverName: 'Driver One', sealRequired: false,
     gate: { arrived: false, verified: false, held: false, admitted: false, exited: false, rejected: false, overridden: false },
     weighed: false, actions: ['arrive'], canReschedule: false, canCancel: false,
     ...overrides,

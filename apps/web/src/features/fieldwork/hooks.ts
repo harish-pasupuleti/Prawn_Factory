@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { api } from '../../lib/api';
+import { api, apiBlob } from '../../lib/api';
 import { useAction as useSharedAction } from '../../lib/mutations';
 import type {
   Assignee, Collection, CollectionStatus, DecisionKind, IncidentType, Inspection, InspectionOutcome, InspectionStatus, Paged, Vehicle,
@@ -52,11 +52,20 @@ export interface InspectionFindings {
 export const useAssignInspection = (requestId: string) =>
   useAction((input: { officerId: string }) => post<Inspection>(`/procurement/${requestId}/inspections`, input), 'inspections');
 
-/** Assigns the field officer and the transport officer + vehicle in one request, so transport does not wait for the inspection. */
-export const useAssignBoth = (requestId: string) =>
-  useAction((input: { officerId: string; transport: { transportOfficerId: string; vehicleId: string; scheduledPickupAt?: string | undefined; expectedArrivalAt?: string | undefined } }) =>
-    post<{ inspectionId: string; collectionId: string }>(`/procurement/${requestId}/assignments`, input),
-  );
+/** Field officer: photos taken at the farm (already shrunk by the browser). */
+export const useUploadPhotos = (id: string) =>
+  useAction(async ({ files, caption }: { files: File[]; caption?: string }) => {
+    const form = new FormData();
+    for (const file of files) form.append('photos', file);
+    if (caption) form.append('caption', caption);
+    return (await api<Collection>(`/collections/${id}/photos`, { method: 'POST', form })).data;
+  }, 'collections');
+export const useSealLoad = (id: string) => useAction(() => post<Collection>(`/collections/${id}/seal`), 'collections');
+
+/** One photo as a Blob. Photos never change, so it is cached for the whole session. */
+export const usePhotoBlob = (collectionId: string, photoId: string) =>
+  useQuery({ queryKey: ['collection-photo', collectionId, photoId], queryFn: () => apiBlob(`/collections/${collectionId}/photos/${photoId}`), staleTime: Infinity, gcTime: 10 * 60_000 });
+
 export const useStartInspection = (id: string) => useAction(() => post<Inspection>(`/inspections/${id}/start`), 'inspections');
 export const useCompleteInspection = (id: string) => useAction((input: InspectionFindings) => post<Inspection>(`/inspections/${id}/complete`, input), 'inspections');
 export const useDecideInspection = (id: string) =>

@@ -26,8 +26,7 @@ An OpenAPI/Swagger document is not generated yet.
 | POST | `/procurement/:id/resubmit` | Farmer (own) | From CLARIFICATION_REQUESTED back to SUBMITTED |
 | POST | `/procurement/:id/amendments` | Purchase Mgr | `{ field, newValue, reason }` while SUBMITTED or CLARIFICATION_REQUESTED |
 | POST | `/procurement/:id/inspections` | Purchase Mgr | `{ officerId }` on an APPROVED request |
-| POST | `/procurement/:id/collections` | Purchase Mgr | `{ transportOfficerId, vehicleId, scheduledPickupAt?, expectedArrivalAt? }` (ISO date-times) on an APPROVED, INSPECTION_ASSIGNED or INSPECTION_PASSED request. Loading starts only after the inspection passes |
-| POST | `/procurement/:id/assignments` | Purchase Mgr | `{ officerId, transport: { transportOfficerId, vehicleId, scheduledPickupAt?, expectedArrivalAt? } }` assigns field officer and transport in one transaction (APPROVED request) |
+| POST | `/procurement/:id/collections` | Purchase Mgr | `{ transportOfficerId, vehicleId, scheduledPickupAt?, expectedArrivalAt? }` (ISO date-times) on an INSPECTION_PASSED request |
 | GET | `/inspections` | Field Officer (own), Purchase Mgr, Admin | Filters `status`, `outcome`; paging |
 | GET | `/inspections/:id` | same | Detail (no farmer price) |
 | POST | `/inspections/:id/start` | Field Officer (assigned) | ASSIGNED → IN_PROGRESS |
@@ -37,7 +36,10 @@ An OpenAPI/Swagger document is not generated yet.
 | GET | `/collections`, `/collections/:id` | Transport Officer (own), Purchase Mgr, Admin | Filter `status`; paging |
 | POST | `/collections/:id/pickup` | Transport Officer (assigned) | ASSIGNED → PICKED_UP |
 | POST | `/collections/:id/load` | Transport Officer (assigned) | `{ collectedQuantityKg, notes? }`; ≤ vehicle capacity; note required if far from inspected quantity |
-| POST | `/collections/:id/dispatch` | Transport Officer (assigned) | `{ expectedArrivalAt? }` (required here if not set at assignment); request becomes IN_TRANSIT |
+| GET | `/collections/:id/photos/:photoId` | Field Officer (own), Transport (own), Purchase Mgr, Admin | Photo bytes (cacheable, private) |
+| POST | `/collections/:id/photos` | Field Officer (inspected the request) | multipart `photos` (up to 4 per call, 4 MB each, 8 per job); only while PICKED_UP or LOADED and not yet sealed |
+| POST | `/collections/:id/seal` | Field Officer (inspected the request) | LOADED job with at least one photo. The server generates the code (returned to the field officer and purchase manager only) |
+| POST | `/collections/:id/dispatch` | Transport Officer (assigned) | `{ expectedArrivalAt? }` (required here if not set at assignment); request becomes IN_TRANSIT. Refused with `SEAL_REQUIRED` until the field officer has sealed the load |
 | POST | `/collections/:id/arrive` | Transport Officer (assigned) | DISPATCHED → ARRIVED |
 | POST | `/collections/:id/handover` | Transport Officer (assigned) | `{ notes? }`; request becomes DELIVERED |
 | POST | `/collections/:id/incidents` | Transport Officer (assigned) | `{ type, description, quantityAffectedKg? }` on an active job |
@@ -68,4 +70,4 @@ Invalid transitions return `409 INVALID_TRANSITION`. Every mutation of a request
 
 ## Audit actions recorded
 
-`auth.register`, `auth.login`, `auth.login_failed`, `auth.account_locked`, `auth.refresh_reuse_detected`, `auth.logout`, `user.create`, `user.update`, `user.access_change`, `admin.seed`, `procurement.submit`, `procurement.approve`, `procurement.reject`, `procurement.request_clarification`, `procurement.resubmit`, `procurement.cancel`, `procurement.amend`, `inspection.assign`, `inspection.start`, `inspection.complete`, `inspection.decision`, `inspection.cancel`, `collection.assign`, `collection.pickup`, `collection.load`, `collection.dispatch`, `collection.arrive`, `collection.handover`, `collection.incident`, `collection.cancel`, `vehicle.create`, `vehicle.update`, `slot.create`, `slot.update`, `booking.create`, `booking.reschedule`, `booking.cancel`, `booking.no_show`, `gate.arrive`, `gate.verify`, `gate.hold`, `gate.releaseHold`, `gate.reject`, `gate.override`, `gate.admit`, `gate.exit`, `weight.record`, `weight.correct`, `shipment.receive`, `shipment.release`, `exception.raise`, `exception.note`, `exception.resolve`, `station.create`, `station.update`, `processing.start`, `processing.complete`.
+`auth.register`, `auth.login`, `auth.login_failed`, `auth.account_locked`, `auth.refresh_reuse_detected`, `auth.logout`, `user.create`, `user.update`, `user.access_change`, `admin.seed`, `procurement.submit`, `procurement.approve`, `procurement.reject`, `procurement.request_clarification`, `procurement.resubmit`, `procurement.cancel`, `procurement.amend`, `inspection.assign`, `inspection.start`, `inspection.complete`, `inspection.decision`, `inspection.cancel`, `collection.assign`, `collection.pickup`, `collection.load`, `collection.dispatch`, `collection.arrive`, `collection.handover`, `collection.photos_added`, `collection.seal`, `collection.incident`, `collection.cancel`, `vehicle.create`, `vehicle.update`, `slot.create`, `slot.update`, `booking.create`, `booking.reschedule`, `booking.cancel`, `booking.no_show`, `gate.arrive`, `gate.verify`, `gate.seal_mismatch`, `gate.hold`, `gate.releaseHold`, `gate.reject`, `gate.override`, `gate.admit`, `gate.exit`, `weight.record`, `weight.correct`, `shipment.receive`, `shipment.release`, `exception.raise`, `exception.note`, `exception.resolve`, `station.create`, `station.update`, `processing.start`, `processing.complete`.

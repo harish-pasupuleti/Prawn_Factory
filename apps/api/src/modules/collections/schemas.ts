@@ -36,9 +36,6 @@ export const assignTransportSchema = z
     }
   });
 
-/** Field officer + transport assigned together in one step. */
-export const assignBothSchema = z.object({ officerId: z.string().uuid('Choose a field officer'), transport: assignTransportSchema }).strict();
-
 export const loadSchema = z.object({ collectedQuantityKg: positiveDecimal('Collected quantity', 3), notes: notes.optional() }).strict();
 
 export const dispatchSchema = z

@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import type { Tx } from './prisma';
 
-const SENSITIVE_KEY = /password|token|secret/i;
+const SENSITIVE_KEY = /password|token|secret|sealcode/i;
 
 /** Recursively drops sensitive keys and converts values (Decimal, Date) to plain JSON. */
 export function scrub(value: unknown): Prisma.InputJsonValue | undefined {

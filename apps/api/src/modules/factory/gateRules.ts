@@ -2,7 +2,7 @@
  * Pure gate rules (no database access). The same function decides what is allowed in the UI and on the server,
  * so the two can never disagree.
  */
-export type GateEventName = 'ARRIVED' | 'VERIFIED' | 'HELD' | 'HOLD_RELEASED' | 'REJECTED' | 'OVERRIDE' | 'ADMITTED' | 'EXITED';
+export type GateEventName = 'ARRIVED' | 'VERIFIED' | 'HELD' | 'HOLD_RELEASED' | 'REJECTED' | 'OVERRIDE' | 'ADMITTED' | 'EXITED' | 'SEAL_MISMATCH';
 
 export interface GateState {
   arrived: boolean;

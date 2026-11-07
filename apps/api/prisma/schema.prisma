@@ -102,6 +102,7 @@ enum GateEventType {
   OVERRIDE
   ADMITTED
   EXITED
+  SEAL_MISMATCH
 }
 
 enum WeightKind {
@@ -155,6 +156,8 @@ model User {
   collectionsAsOfficer CollectionJob[]        @relation("CollectionOfficer")
   collectionsCreated   CollectionJob[]        @relation("CollectionAssigner")
   incidentsReported    CollectionIncident[]
+  collectionsSealed    CollectionJob[]        @relation("CollectionSealer")
+  photosUploaded       CollectionPhoto[]
   slotsCreated         FactorySlot[]
   bookingsReserved     SlotBooking[]
   gateEvents           GateEvent[]
@@ -346,6 +349,13 @@ model CollectionJob {
   handedOverAt        DateTime?
   handoverNotes       String?
   cancelReason        String?
+  // Seal applied by the field officer after loading. The code is never shown to the transport or security officer;
+  // the security officer must type it at the gate and the server compares it.
+  sealCode           String?          @unique
+  sealedAt           DateTime?
+  sealedById         String?          @db.Uuid
+  sealFailedAttempts Int              @default(0)
+  sealLastFailedAt   DateTime?
   createdAt           DateTime         @default(now())
   updatedAt           DateTime         @updatedAt
 
@@ -353,7 +363,9 @@ model CollectionJob {
   transportOfficer  User                 @relation("CollectionOfficer", fields: [transportOfficerId], references: [id], onDelete: Restrict)
   assignedBy        User                 @relation("CollectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
   vehicle           Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  sealedBy          User?                @relation("CollectionSealer", fields: [sealedById], references: [id], onDelete: Restrict)
   incidents         CollectionIncident[]
+  photos            CollectionPhoto[]
   shipment          Shipment?
 
   @@index([requestId, createdAt])
@@ -556,4 +568,21 @@ model QueueEntry {
   completedBy User?              @relation("QueueCompleter", fields: [completedById], references: [id], onDelete: Restrict)
 
   @@index([status, createdAt])
+}
+
+/** Photos taken at the farm by the field officer. Append-only; stored in the database so no extra storage service is needed. */
+model CollectionPhoto {
+  id              String   @id @default(uuid()) @db.Uuid
+  collectionJobId String   @db.Uuid
+  uploadedById    String   @db.Uuid
+  mimeType        String
+  sizeBytes       Int
+  caption         String?
+  data            Bytes
+  createdAt       DateTime @default(now())
+
+  collectionJob CollectionJob @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
+  uploadedBy    User          @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@index([collectionJobId, createdAt])
 }
