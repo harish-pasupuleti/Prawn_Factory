@@ -239,15 +239,33 @@ export async function bookedShipment(staff: Staff, opts: { slot?: Slot; capacity
   };
 }
 
-/** The driver has collected the goods, dispatched and arrived at the factory. */
+// A 1x1 PNG, enough to pass the server's image check.
+const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+export const uploadPhoto = (token: string, collectionId: string) =>
+  request(app)
+    .post(`/api/v1/collections/${collectionId}/photos`)
+    .set(bearer(token))
+    .attach('photos', TINY_PNG, { filename: 'farm.png', contentType: 'image/png' });
+
+/** The inspecting field officer photographs the loaded vehicle and seals it. Returns the seal code. */
+export async function sealLoad(staff: Staff, collectionId: string): Promise<string> {
+  expect((await uploadPhoto(staff.officerToken, collectionId)).status).toBe(201);
+  const sealed = await post(staff.officerToken, `/collections/${collectionId}/seal`);
+  expect(sealed.status).toBe(200);
+  return sealed.body.data.sealCode as string;
+}
+
+/** The driver has collected the goods, the field officer sealed the load, and the vehicle was dispatched and arrived at the factory. */
 export async function arrivedShipment(staff: Staff, opts: { slot?: Slot; collectedKg?: string } = {}) {
   const b = await bookedShipment(staff, opts.slot ? { slot: opts.slot } : {});
   const base = `/collections/${b.collectionId}`;
   expect((await post(b.driverToken, `${base}/pickup`)).status).toBe(200);
   expect((await post(b.driverToken, `${base}/load`, { collectedQuantityKg: opts.collectedKg ?? '400', notes: 'Collected as agreed with the farmer' })).status).toBe(200);
+  const sealCode = await sealLoad(staff, b.collectionId);
   expect((await post(b.driverToken, `${base}/dispatch`)).status).toBe(200);
   expect((await post(b.driverToken, `${base}/arrive`)).status).toBe(200);
-  return b;
+  return { ...b, sealCode };
 }
 
 /** The vehicle has been through the gate and is admitted. */
@@ -255,7 +273,7 @@ export async function admittedShipment(staff: Staff, fs: FactoryStaff, opts: { s
   const a = await arrivedShipment(staff, opts);
   const path = `/bookings/${a.bookingId}`;
   expect((await post(fs.securityToken, `${path}/arrive`)).status).toBe(200);
-  expect((await post(fs.securityToken, `${path}/verify`, { registrationNumber: a.vehicle.registrationNumber })).status).toBe(200);
+  expect((await post(fs.securityToken, `${path}/verify`, { registrationNumber: a.vehicle.registrationNumber, sealCode: a.sealCode })).status).toBe(200);
   const admitted = await post(fs.securityToken, `${path}/admit`);
   expect(admitted.status).toBe(200);
   return a;

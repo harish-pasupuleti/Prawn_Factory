@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '../../src/lib/prisma';
 import {
   approvedRequest, assignedCollection, createStaff, createUser, createVehicle, get, hoursFromNow, loginAs,
-  newDriver, passedRequest, post, requestStatus, type Staff,
+  newDriver, passedRequest, post, requestStatus, sealLoad, type Staff,
 } from './helpers';
 
 let staff: Staff;
@@ -108,6 +108,12 @@ describe('transport steps', () => {
     expect(loaded.status).toBe(200);
     expect(loaded.body.data.collectedQuantityKg).toBe('395.250');
 
+    // Dispatch needs the field officer's seal first.
+    const unsealed = await post(r.driverToken, `${base}/dispatch`);
+    expect(unsealed.status).toBe(409);
+    expect(unsealed.body.error.code).toBe('SEAL_REQUIRED');
+    await sealLoad(staff, r.collectionId);
+
     const dispatched = await post(r.driverToken, `${base}/dispatch`);
     expect(dispatched.status).toBe(200);
     expect(await requestStatus(r.id)).toBe('IN_TRANSIT');
@@ -168,6 +174,7 @@ describe('transport steps', () => {
     const id = res.body.data.id as string;
     await post(d.driverToken, `/collections/${id}/pickup`);
     await post(d.driverToken, `/collections/${id}/load`, { collectedQuantityKg: '400' });
+    await sealLoad(staff, id);
     const noEta = await post(d.driverToken, `/collections/${id}/dispatch`);
     expect(noEta.status).toBe(400);
     expect(noEta.body.error.code).toBe('EXPECTED_ARRIVAL_REQUIRED');
@@ -181,6 +188,7 @@ describe('transport steps', () => {
     const base = `/collections/${r.collectionId}`;
     await post(r.driverToken, `${base}/pickup`);
     await post(r.driverToken, `${base}/load`, { collectedQuantityKg: '400' });
+    await sealLoad(staff, r.collectionId);
     await post(r.driverToken, `${base}/dispatch`);
     await post(r.driverToken, `${base}/arrive`);
     await post(r.driverToken, `${base}/handover`);
@@ -273,6 +281,7 @@ describe('cancelling', () => {
     const base = `/collections/${r.collectionId}`;
     await post(r.driverToken, `${base}/pickup`);
     await post(r.driverToken, `${base}/load`, { collectedQuantityKg: '400' });
+    await sealLoad(staff, r.collectionId);
     await post(r.driverToken, `${base}/dispatch`);
     expect((await post(staff.managerToken, `${base}/cancel`, { reason: 'too late to cancel' })).status).toBe(409);
     const cancelRequest = await post(staff.managerToken, `/procurement/${r.id}/cancel`, { reason: 'too late to cancel' });

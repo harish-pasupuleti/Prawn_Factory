@@ -82,6 +82,8 @@ export function refreshSession(): Promise<SessionPayload | null> {
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH';
   body?: unknown;
+  /** Multipart upload (photos). The browser sets the Content-Type boundary itself. */
+  form?: FormData;
   query?: Record<string, string | number | undefined>;
   /** Internal: allow exactly one retry after a token refresh. */
   retry?: boolean;
@@ -98,12 +100,12 @@ function buildUrl(path: string, query?: RequestOptions['query']) {
 
 async function send(path: string, opts: RequestOptions, authenticated: boolean): Promise<Response> {
   const headers: Record<string, string> = {};
-  if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (opts.body !== undefined && !opts.form) headers['Content-Type'] = 'application/json';
   if (authenticated && accessToken) headers.Authorization = `Bearer ${accessToken}`;
   return fetch(buildUrl(path, opts.query), {
     method: opts.method ?? 'GET',
     headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    body: opts.form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
     credentials: 'same-origin',
   });
 }
@@ -120,6 +122,21 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<{
     res = await send(path, { ...opts, retry: false }, true);
   }
   return parse(res);
+}
+
+/** Authenticated download of a binary file (a photo). The Bearer token cannot be sent by a plain <img src>, so we fetch it ourselves. */
+export async function apiBlob(path: string): Promise<Blob> {
+  let res = await send(path, {}, true);
+  if (res.status === 401) {
+    const session = await refreshSession();
+    if (!session) {
+      onSessionExpired?.();
+      throw new ApiError(401, 'UNAUTHENTICATED', 'Your session has expired');
+    }
+    res = await send(path, {}, true);
+  }
+  if (!res.ok) throw new ApiError(res.status, 'REQUEST_FAILED', 'Could not load the photo');
+  return res.blob();
 }
 
 /** Unauthenticated JSON request (login, register). */

@@ -11,12 +11,15 @@ import { ACTIVE_COLLECTION_STATUSES, assertCollectionTransition } from '../../li
 import type { AuthUser } from '../../types/express';
 import { moveRequest } from '../procurement/transitions';
 import { currentDeclaration } from '../procurement/view';
-import { arrivedLate, isActiveCollection, isCollectionOverdue } from './rules';
+import { arrivedLate, formatSealCode, isActiveCollection, isCollectionOverdue } from './rules';
 import type { AssignTransportInput, IncidentInput, LoadInput } from './schemas';
 
 const collectionInclude = {
   vehicle: { select: { id: true, registrationNumber: true, capacityKg: true } },
   transportOfficer: { select: { fullName: true } },
+  sealedBy: { select: { fullName: true } },
+  // Metadata only; the image bytes are fetched separately, one photo at a time.
+  photos: { orderBy: { createdAt: 'asc' }, select: { id: true, caption: true, sizeBytes: true, mimeType: true, createdAt: true, uploadedBy: { select: { fullName: true } } } },
   incidents: { orderBy: { createdAt: 'asc' }, include: { reporter: { select: { fullName: true } } } },
   shipment: {
     select: {
@@ -46,14 +49,18 @@ const collectionInclude = {
 
 type CollectionRow = Prisma.CollectionJobGetPayload<{ include: typeof collectionInclude }>;
 
-/** Transport officers see only their own jobs; the manager and administrator see all. */
-function scopeFor(actor: AuthUser): Prisma.CollectionJobWhereInput {
+/** Transport officers see their own jobs, field officers the jobs for requests they inspected; the manager and administrator see all. */
+export function scopeFor(actor: AuthUser): Prisma.CollectionJobWhereInput {
   if (actor.role === 'TRANSPORT_OFFICER') return { transportOfficerId: actor.id };
+  if (actor.role === 'FIELD_OFFICER') return { request: { inspections: { some: { officerId: actor.id, status: 'COMPLETED' } } } };
   if (actor.role === 'PURCHASE_MANAGER' || actor.role === 'ADMIN') return {};
   throw forbidden();
 }
 
-function toDto(row: CollectionRow, now = new Date()) {
+/** Only the field officer who sealed the load and the purchase manager may read the seal code. */
+const canSeeSealCode = (actor: AuthUser) => actor.role === 'FIELD_OFFICER' || actor.role === 'PURCHASE_MANAGER';
+
+function toDto(row: CollectionRow, actor: AuthUser, now = new Date()) {
   // A transport officer needs pickup details and the farmer's contact, but not the expected price.
   const { expectedPriceInrPerKg: _price, ...declaration } = currentDeclaration(row.request, row.request.amendments);
   return {
@@ -91,6 +98,11 @@ function toDto(row: CollectionRow, now = new Date()) {
     handedOverAt: row.handedOverAt,
     handoverNotes: row.handoverNotes,
     cancelReason: row.cancelReason,
+    photos: row.photos.map((p) => ({ id: p.id, caption: p.caption, sizeBytes: p.sizeBytes, mimeType: p.mimeType, by: p.uploadedBy.fullName, at: p.createdAt })),
+    sealed: row.sealedAt !== null,
+    sealedAt: row.sealedAt,
+    sealedBy: row.sealedBy?.fullName ?? null,
+    sealCode: canSeeSealCode(actor) && row.sealCode ? formatSealCode(row.sealCode) : null,
     // The arrival slot booked by the purchase manager, if any.
     shipment: row.shipment
       ? {
@@ -118,7 +130,7 @@ function toDto(row: CollectionRow, now = new Date()) {
 export async function getCollection(actor: AuthUser, id: string) {
   const row = await prisma.collectionJob.findFirst({ where: { id, ...scopeFor(actor) }, include: collectionInclude, relationLoadStrategy: 'join' });
   if (!row) throw notFound('Collection job not found');
-  return toDto(row);
+  return toDto(row, actor);
 }
 
 export async function listCollections(actor: AuthUser, query: { page: number; pageSize: number; status?: CollectionStatus }) {
@@ -135,22 +147,13 @@ export async function listCollections(actor: AuthUser, query: { page: number; pa
     prisma.collectionJob.count({ where }),
   ]);
   const now = new Date();
-  return { items: rows.map((r) => toDto(r, now)), meta: pageMeta(query.page, query.pageSize, total) };
+  return { items: rows.map((r) => toDto(r, actor, now)), meta: pageMeta(query.page, query.pageSize, total) };
 }
 
-/** Transport may be assigned alongside the field officer, so it no longer waits for the inspection to pass. */
-const TRANSPORT_ASSIGNABLE_STATUSES = ['APPROVED', 'INSPECTION_ASSIGNED', 'INSPECTION_PASSED'];
-
-/** Creates the collection job. The caller holds the request lock inside the same transaction. */
+/** Transport is assigned only after the field officer's inspection has passed. The caller holds the request lock. */
 export async function assignTransportTx(tx: Tx, actor: AuthUser, requestId: string, input: AssignTransportInput, ip: string | undefined): Promise<string> {
-  const request = await tx.procurementRequest.findUnique({ where: { id: requestId }, select: { status: true } });
-  if (!request) throw notFound('Procurement request not found');
-  if (!TRANSPORT_ASSIGNABLE_STATUSES.includes(request.status)) {
-    // Failed or under-review inspections, and anything past transport assignment, cannot get a new job.
-    throw conflict('INVALID_TRANSITION', `Transport cannot be assigned while the request is ${request.status}`);
-  }
-  // Already inspected: the request moves on now. Otherwise it moves on when the inspection clears (see advanceIfTransportAssigned).
-  if (request.status === 'INSPECTION_PASSED') await moveRequest(tx, requestId, 'TRANSPORT_ASSIGNED', actor.id);
+  // Validates that the request is INSPECTION_PASSED (otherwise 409 INVALID_TRANSITION).
+  const from = await moveRequest(tx, requestId, 'TRANSPORT_ASSIGNED', actor.id);
 
   const [officer, vehicle] = await Promise.all([
     tx.user.findFirst({ where: { id: input.transportOfficerId, role: 'TRANSPORT_OFFICER', status: 'ACTIVE' }, select: { id: true } }),
@@ -186,7 +189,7 @@ export async function assignTransportTx(tx: Tx, actor: AuthUser, requestId: stri
     action: 'collection.assign',
     entityType: 'CollectionJob',
     entityId: job.id,
-    before: { requestStatus: request.status },
+    before: { requestStatus: from },
     after: {
       requestId,
       transportOfficerId: officer.id,
@@ -257,11 +260,6 @@ export const load = (actor: AuthUser, id: string, input: LoadInput, ip: string |
     if (exceedsCapacity(input.collectedQuantityKg, job.vehicle.capacityKg.toFixed(3))) {
       throw badRequest('EXCEEDS_VEHICLE_CAPACITY', `Collected quantity exceeds the vehicle capacity of ${job.vehicle.capacityKg.toFixed(3)} kg`);
     }
-    // Assignment happens in parallel with the inspection, but goods are only loaded once it has cleared.
-    const request = await tx.procurementRequest.findUnique({ where: { id: job.requestId }, select: { status: true } });
-    if (request?.status !== 'TRANSPORT_ASSIGNED') {
-      throw conflict('INSPECTION_NOT_CLEARED', 'Loading can start once the field inspection has passed.');
-    }
     const inspected = await tx.fieldInspection.findFirst({
       where: { requestId: job.requestId, status: 'COMPLETED' },
       orderBy: { completedAt: 'desc' },
@@ -284,6 +282,7 @@ export const load = (actor: AuthUser, id: string, input: LoadInput, ip: string |
 export const dispatch = (actor: AuthUser, id: string, expectedArrivalAt: Date | undefined, ip: string | undefined) =>
   step(actor, id, 'DISPATCHED', 'collection.dispatch', ip, async (_tx, job) => {
     const expected = expectedArrivalAt ?? job.expectedArrivalAt;
+    if (!job.sealedAt) throw conflict('SEAL_REQUIRED', 'The field officer must photograph and seal the load before it can be dispatched');
     if (!expected) throw badRequest('EXPECTED_ARRIVAL_REQUIRED', 'Provide the expected arrival time before dispatching');
     return { data: { dispatchedAt: new Date(), expectedArrivalAt: expected }, audit: { expectedArrivalAt: expected }, requestMove: 'IN_TRANSIT' };
   });
@@ -327,7 +326,7 @@ export async function reportIncident(actor: AuthUser, id: string, input: Inciden
   return getCollection(actor, id);
 }
 
-/** Purchase Manager cancels a job before dispatch; the request returns to INSPECTION_PASSED if the inspection had already cleared. */
+/** Purchase Manager cancels a job before dispatch; the request returns to INSPECTION_PASSED. */
 export async function cancelCollection(actor: AuthUser, id: string, reason: string, ip: string | undefined) {
   await prisma.$transaction(async (tx) => {
     const ref = await tx.collectionJob.findUnique({ where: { id }, select: { requestId: true } });
@@ -336,17 +335,14 @@ export async function cancelCollection(actor: AuthUser, id: string, reason: stri
     const job = await tx.collectionJob.findUniqueOrThrow({ where: { id } });
     assertCollectionTransition(job.status, 'CANCELLED');
     await tx.collectionJob.update({ where: { id }, data: { status: 'CANCELLED', cancelReason: reason } });
-    // The request only moved to TRANSPORT_ASSIGNED once the inspection had cleared; before that it is left alone.
-    const request = await tx.procurementRequest.findUniqueOrThrow({ where: { id: ref.requestId }, select: { status: true } });
-    const from = request.status;
-    if (from === 'TRANSPORT_ASSIGNED') await moveRequest(tx, ref.requestId, 'INSPECTION_PASSED', actor.id, `Collection cancelled: ${reason}`);
+    const from = await moveRequest(tx, ref.requestId, 'INSPECTION_PASSED', actor.id, `Collection cancelled: ${reason}`);
     await recordAudit(tx, {
       actorId: actor.id,
       action: 'collection.cancel',
       entityType: 'CollectionJob',
       entityId: id,
       before: { status: job.status, requestStatus: from },
-      after: { status: 'CANCELLED', reason, requestStatus: from === 'TRANSPORT_ASSIGNED' ? 'INSPECTION_PASSED' : from },
+      after: { status: 'CANCELLED', reason, requestStatus: 'INSPECTION_PASSED' },
       ip,
     });
   });

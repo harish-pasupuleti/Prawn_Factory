@@ -9,7 +9,7 @@ import { prisma, type Tx } from '../../lib/prisma';
 import { exceedsVariance, varianceHundredths } from '../../lib/quantity';
 import { assertInspectionTransition } from '../../lib/stateMachine';
 import type { AuthUser } from '../../types/express';
-import { advanceIfTransportAssigned, moveRequest } from '../procurement/transitions';
+import { moveRequest } from '../procurement/transitions';
 import { currentDeclaration } from '../procurement/view';
 import type { CompleteInspectionInput } from './schemas';
 
@@ -212,7 +212,6 @@ export async function completeInspection(actor: AuthUser, id: string, input: Com
 
     const reasonForFarmer = input.outcome === 'PASS' ? undefined : input.discrepancyNotes || input.qualityNotes;
     const from = await moveRequest(tx, ref.requestId, OUTCOME_TARGET[input.outcome], actor.id, reasonForFarmer);
-    if (input.outcome === 'PASS') await advanceIfTransportAssigned(tx, ref.requestId, actor.id);
 
     await recordAudit(tx, {
       actorId: actor.id,
@@ -260,14 +259,6 @@ export async function decideInspection(
 
     const target = DECISION_TARGET[input.decision];
     const from = await moveRequest(tx, ref.requestId, target, actor.id, input.reason);
-    if (input.decision === 'PROCEED') await advanceIfTransportAssigned(tx, ref.requestId, actor.id);
-    if (input.decision === 'REJECT') {
-      // Transport assigned in parallel with the inspection has nothing left to collect.
-      await tx.collectionJob.updateMany({
-        where: { requestId: ref.requestId, status: { in: ['ASSIGNED', 'PICKED_UP', 'LOADED'] } },
-        data: { status: 'CANCELLED', cancelReason: `Request rejected: ${input.reason}` },
-      });
-    }
     await tx.inspectionDecision.create({
       data: { requestId: ref.requestId, inspectionId: id, kind: input.decision, reason: input.reason, decidedById: actor.id },
     });

@@ -29,7 +29,7 @@ export function navItemsFor(role: Role): NavItem[] {
         { to: '/factory/slots', label: 'Slots' },
       ];
     case 'FIELD_OFFICER':
-      return [dashboard, { to: '/inspections', label: 'My inspections' }];
+      return [dashboard, { to: '/inspections', label: 'My inspections' }, { to: '/collections', label: 'Collections to attend' }];
     case 'TRANSPORT_OFFICER':
       return [dashboard, { to: '/collections', label: 'My collections' }];
     case 'SECURITY_OFFICER':

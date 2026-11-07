@@ -68,7 +68,7 @@ export function bookingsRouter(): Router {
   });
 
   // Gate steps: Security Officer.
-  const gate = (path: string, action: GateAction, parse: (body: unknown) => { registrationNumber?: string; reason?: string }) =>
+  const gate = (path: string, action: GateAction, parse: (body: unknown) => { registrationNumber?: string; sealCode?: string | undefined; reason?: string }) =>
     router.post(`/:id/${path}`, requireRole('SECURITY_OFFICER'), async (req, res) => {
       const { id } = idParam.parse(req.params);
       res.json({ data: await bookings.gateAction(req.user!, id, action, parse(req.body), req.ip) });

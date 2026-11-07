@@ -19,7 +19,7 @@ describe('gate entry', () => {
     const a = await arrivedShipment(staff);
     const id = a.bookingId;
     expect((await gate(fs.securityToken, id, 'arrive')).body.data.actions).toEqual(expect.arrayContaining(['verify', 'hold', 'reject']));
-    expect((await gate(fs.securityToken, id, 'verify', { registrationNumber: a.vehicle.registrationNumber.toLowerCase() })).status).toBe(200);
+    expect((await gate(fs.securityToken, id, 'verify', { registrationNumber: a.vehicle.registrationNumber.toLowerCase(), sealCode: a.sealCode })).status).toBe(200);
     const admitted = await gate(fs.securityToken, id, 'admit');
     expect(admitted.status).toBe(200);
     expect(admitted.body.data.status).toBe('CHECKED_IN');
@@ -73,7 +73,7 @@ describe('holds and rejections', () => {
     const a = await arrivedShipment(staff);
     const id = a.bookingId;
     await gate(fs.securityToken, id, 'arrive');
-    await gate(fs.securityToken, id, 'verify', { registrationNumber: a.vehicle.registrationNumber });
+    await gate(fs.securityToken, id, 'verify', { registrationNumber: a.vehicle.registrationNumber, sealCode: a.sealCode });
     expect((await gate(fs.securityToken, id, 'hold', {})).status).toBe(400);
     expect((await gate(fs.securityToken, id, 'hold', { reason: 'Ice box seal looks broken' })).status).toBe(200);
     expect((await gate(fs.securityToken, id, 'admit')).status).toBe(409);
@@ -110,7 +110,7 @@ describe('time window and authorised override', () => {
     const slot = await makeSlot(staff, { startHours, durationHours: 2 });
     const a = await arrivedShipment(staff, { slot });
     await gate(fs.securityToken, a.bookingId, 'arrive');
-    await gate(fs.securityToken, a.bookingId, 'verify', { registrationNumber: a.vehicle.registrationNumber });
+    await gate(fs.securityToken, a.bookingId, 'verify', { registrationNumber: a.vehicle.registrationNumber, sealCode: a.sealCode });
     return a;
   }
 

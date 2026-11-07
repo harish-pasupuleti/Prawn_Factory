@@ -11,9 +11,8 @@ import {
 } from './schemas';
 import { assignInspectionSchema } from '../inspections/schemas';
 import * as inspections from '../inspections/service';
-import { assignBothSchema, assignTransportSchema } from '../collections/schemas';
+import { assignTransportSchema } from '../collections/schemas';
 import * as collections from '../collections/service';
-import { assignFieldAndTransport } from './assignments';
 import * as service from './service';
 
 export function procurementRouter(): Router {
@@ -63,18 +62,11 @@ export function procurementRouter(): Router {
     res.status(201).json({ data: await service.amendRequest(req.user!, id, input, req.ip) });
   });
 
-  // Purchase Manager only: assign a field officer and transport (separately, or together via /assignments).
+  // Purchase Manager only: assign a field officer first (APPROVED requests), then transport once the inspection has passed.
   router.post('/:id/inspections', requireRole('PURCHASE_MANAGER'), async (req, res) => {
     const { id } = idParamSchema.parse(req.params);
     const { officerId } = assignInspectionSchema.parse(req.body);
     res.status(201).json({ data: await inspections.assignInspection(req.user!, id, officerId, req.ip) });
-  });
-
-  // Field officer + transport in one step, so transport does not wait for the inspection.
-  router.post('/:id/assignments', requireRole('PURCHASE_MANAGER'), async (req, res) => {
-    const { id } = idParamSchema.parse(req.params);
-    const input = assignBothSchema.parse(req.body);
-    res.status(201).json({ data: await assignFieldAndTransport(req.user!, id, input, req.ip) });
   });
 
   router.post('/:id/collections', requireRole('PURCHASE_MANAGER'), async (req, res) => {

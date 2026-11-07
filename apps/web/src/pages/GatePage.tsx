@@ -36,9 +36,10 @@ export function GatePage() {
   const gate = useGateAction();
   const [pending, setPending] = useState<Pending>(null);
   const [plate, setPlate] = useState('');
+  const [sealCode, setSealCode] = useState('');
   const [errorFor, setErrorFor] = useState<{ id: string; message: string } | null>(null);
 
-  const run = async (b: Booking, action: GateAction, extra: { registrationNumber?: string; reason?: string } = {}) => {
+  const run = async (b: Booking, action: GateAction, extra: { registrationNumber?: string; sealCode?: string; reason?: string } = {}) => {
     setErrorFor(null);
     try {
       await gate.mutateAsync({ bookingId: b.id, action, ...extra });
@@ -47,7 +48,7 @@ export function GatePage() {
       throw err;
     }
   };
-  const closePending = () => { setPending(null); setPlate(''); };
+  const closePending = () => { setPending(null); setPlate(''); setSealCode(''); setErrorFor(null); };
 
   return (
     <>
@@ -89,10 +90,16 @@ export function GatePage() {
 
       <Dialog open={pending?.action === 'verify'} title="Verify the vehicle" onClose={closePending}>
         <p className="mb-4 text-sm text-slate-600">Read the registration number from the vehicle and type it exactly as you see it.</p>
-        <TextField label="Registration number on the vehicle" value={plate} onChange={(e) => setPlate(e.target.value)} autoComplete="off" />
+        <div className="space-y-4">
+          <TextField label="Registration number on the vehicle" value={plate} onChange={(e) => setPlate(e.target.value)} autoComplete="off" />
+          {pending?.booking.sealRequired && (
+            <TextField label="Code printed on the seal" value={sealCode} onChange={(e) => setSealCode(e.target.value)} autoComplete="off" autoCapitalize="characters" spellCheck={false} hint="Type it from the seal on the load. The system checks it; you are not shown the expected code." />
+          )}
+          {errorFor && errorFor.id === pending?.booking.id && <Alert tone="error">{errorFor.message}</Alert>}
+        </div>
         <div className="mt-5 flex justify-end gap-3">
           <Button variant="secondary" onClick={closePending}>Back</Button>
-          <Button disabled={plate.trim().length < 2} onClick={() => pending && void run(pending.booking, 'verify', { registrationNumber: plate.trim() }).then(closePending, closePending)}>Verify</Button>
+          <Button disabled={plate.trim().length < 2 || (pending?.booking.sealRequired === true && sealCode.trim().length < 4)} onClick={() => pending && void run(pending.booking, 'verify', { registrationNumber: plate.trim(), ...(pending.booking.sealRequired ? { sealCode: sealCode.trim() } : {}) }).then(closePending, () => setSealCode(''))}>Verify</Button>
         </div>
       </Dialog>
       <Dialog open={pending?.action === 'admit' || pending?.action === 'exit'} title={pending?.action === 'exit' ? 'Let this vehicle leave?' : 'Admit this vehicle?'} onClose={closePending}>

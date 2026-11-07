@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useAssignBoth, useAssignees, useAssignInspection, useAssignTransport, useVehicles } from '../features/fieldwork/hooks';
+import { useAssignees, useAssignInspection, useAssignTransport, useVehicles } from '../features/fieldwork/hooks';
 import { ApiError } from '../lib/api';
 import { errorMessage } from '../lib/errors';
 import { formatKg } from '../lib/format';
@@ -110,49 +110,6 @@ export function AssignTransportDialog({ requestId, open, onClose }: { requestId:
       <div className="mt-5 flex justify-end gap-3">
         <Button variant="secondary" onClick={close}>Back</Button>
         <Button onClick={() => void submit()} disabled={!form.officerId || !form.vehicleId} loading={assign.isPending}>Assign transport</Button>
-      </div>
-    </Dialog>
-  );
-}
-
-/** Assigns the field officer and transport together: transport does not wait for the inspection result. */
-export function AssignBothDialog({ requestId, open, onClose }: { requestId: string; open: boolean; onClose: () => void }) {
-  const fieldOfficers = useAssignees('FIELD_OFFICER', open);
-  const assign = useAssignBoth(requestId);
-  const [fieldOfficerId, setFieldOfficerId] = useState('');
-  const [form, setForm] = useState<TransportForm>(EMPTY_TRANSPORT);
-  const [error, setError] = useState<string | null>(null);
-
-  const close = () => { setFieldOfficerId(''); setForm(EMPTY_TRANSPORT); setError(null); onClose(); };
-  if (!open) return null;
-  const submit = async () => {
-    setError(null);
-    try {
-      await assign.mutateAsync({ officerId: fieldOfficerId, transport: toTransportInput(form) });
-      close();
-    } catch (err) {
-      setError(firstDetail(err));
-    }
-  };
-
-  return (
-    <Dialog open={open} title="Assign field officer and transport" onClose={close}>
-      <p className="mb-4 text-sm text-slate-600">Both are assigned at once. The vehicle can be loaded after the field officer's inspection passes.</p>
-      {error && <div className="mb-4"><Alert tone="error">{error}</Alert></div>}
-      <div className="space-y-4">
-        {fieldOfficers.isLoading ? <Spinner /> : fieldOfficers.isError ? <Alert tone="error">{errorMessage(fieldOfficers.error)}</Alert> : fieldOfficers.data!.length === 0 ? (
-          <Alert tone="warning">There are no active field officers. Ask an administrator to create one.</Alert>
-        ) : (
-          <SelectField label="Field officer" value={fieldOfficerId} onChange={(e) => setFieldOfficerId(e.target.value)} hint="The number in brackets is how many inspections the officer already has open.">
-            <option value="">Choose an officer…</option>
-            {fieldOfficers.data!.map((o) => <option key={o.id} value={o.id}>{o.fullName} ({o.activeCount} open)</option>)}
-          </SelectField>
-        )}
-        <TransportFields form={form} setForm={setForm} enabled={open} />
-      </div>
-      <div className="mt-5 flex justify-end gap-3">
-        <Button variant="secondary" onClick={close}>Back</Button>
-        <Button onClick={() => void submit()} disabled={!fieldOfficerId || !form.officerId || !form.vehicleId} loading={assign.isPending}>Assign both</Button>
       </div>
     </Dialog>
   );

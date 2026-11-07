@@ -8,10 +8,11 @@ import { pageMeta } from '../../lib/pagination';
 import { prisma, type Tx } from '../../lib/prisma';
 import { ACTIVE_BOOKING_STATUSES, assertBookingTransition } from '../../lib/stateMachine';
 import type { AuthUser } from '../../types/express';
-import { isActiveCollection } from '../collections/rules';
+import { isActiveCollection, MAX_SEAL_ATTEMPTS, SEAL_LOCK_MINUTES, sealCodesMatch, sealLockedUntil } from '../collections/rules';
 import { allowedGateActions, gateState, MANAGER_GATE_ACTIONS, normalisePlate, windowState, type GateAction } from './gateRules';
 import { bookedCount, lockSlot } from './slots';
 import { currentWeights } from './weights';
+
 
 const bookingInclude = {
   slot: true,
@@ -19,7 +20,7 @@ const bookingInclude = {
   shipment: {
     include: {
       request: { select: { id: true, code: true } },
-      collectionJob: { select: { status: true, vehicle: { select: { registrationNumber: true } }, transportOfficer: { select: { fullName: true } } } },
+      collectionJob: { select: { id: true, status: true, sealCode: true, sealedAt: true, sealFailedAttempts: true, sealLastFailedAt: true, vehicle: { select: { registrationNumber: true } }, transportOfficer: { select: { fullName: true } } } },
       weights: { select: { id: true, kind: true, valueKg: true, supersedesId: true } },
     },
   },
@@ -58,6 +59,8 @@ function toDto(row: BookingRow, actor: AuthUser, now = new Date()) {
     shipment: { id: row.shipment.id, code: row.shipment.code, status: row.shipment.status },
     vehicleRegistration: row.shipment.collectionJob.vehicle.registrationNumber,
     driverName: row.shipment.collectionJob.transportOfficer.fullName,
+    // Whether the load was sealed at the farm. The code itself is never sent to the gate.
+    sealRequired: row.shipment.collectionJob.sealedAt !== null,
     gate: state,
     weighed,
     actions: gateRoleActions,
@@ -233,11 +236,49 @@ const EVENT_FOR: Record<GateAction, GateEventType> = {
   exit: 'EXITED',
 };
 
+class SealMismatchError extends Error {}
+
 export async function gateAction(
   actor: AuthUser,
   bookingId: string,
   action: GateAction,
-  input: { registrationNumber?: string | undefined; reason?: string | undefined },
+  input: { registrationNumber?: string | undefined; sealCode?: string | undefined; reason?: string | undefined },
+  ip: string | undefined,
+) {
+  try {
+    return await runGateAction(actor, bookingId, action, input, ip);
+  } catch (err) {
+    if (!(err instanceof SealMismatchError)) throw err;
+    // The wrong attempt must be kept even though the transaction above was rolled back.
+    await recordSealMismatch(actor, bookingId, ip);
+    throw new AppError(400, 'SEAL_MISMATCH', 'The seal code does not match this load. Check the seal and try again, or hold or refuse the vehicle.');
+  }
+}
+
+async function recordSealMismatch(actor: AuthUser, bookingId: string, ip: string | undefined) {
+  await prisma.$transaction(async (tx) => {
+    const booking = await tx.slotBooking.findUnique({
+      where: { id: bookingId },
+      select: { shipmentId: true, shipment: { select: { code: true, collectionJobId: true } } },
+    });
+    if (!booking) return;
+    const job = await tx.collectionJob.findUniqueOrThrow({ where: { id: booking.shipment.collectionJobId }, select: { sealFailedAttempts: true, sealLastFailedAt: true } });
+    const now = new Date();
+    const stale = job.sealLastFailedAt !== null && now.getTime() - job.sealLastFailedAt.getTime() > SEAL_LOCK_MINUTES * 60_000;
+    const attempts = (stale ? 0 : job.sealFailedAttempts) + 1;
+    await tx.collectionJob.update({ where: { id: booking.shipment.collectionJobId }, data: { sealFailedAttempts: attempts, sealLastFailedAt: now } });
+    await tx.gateEvent.create({
+      data: { shipmentId: booking.shipmentId, bookingId, type: 'SEAL_MISMATCH', actorId: actor.id, reason: `Wrong seal code entered (attempt ${attempts} of ${MAX_SEAL_ATTEMPTS})` },
+    });
+    await recordAudit(tx, { actorId: actor.id, action: 'gate.seal_mismatch', entityType: 'SlotBooking', entityId: bookingId, after: { shipmentCode: booking.shipment.code, attempts }, ip });
+  });
+}
+
+async function runGateAction(
+  actor: AuthUser,
+  bookingId: string,
+  action: GateAction,
+  input: { registrationNumber?: string | undefined; sealCode?: string | undefined; reason?: string | undefined },
   ip: string | undefined,
 ) {
   await withBooking(bookingId, async (tx, row) => {
@@ -261,6 +302,18 @@ export async function gateAction(
         throw conflict('VEHICLE_NOT_DISPATCHED', 'This consignment has not been dispatched from the farm yet');
       }
       if (typed !== expected) throw new AppError(400, 'PLATE_MISMATCH', 'The registration number does not match the booked vehicle');
+
+      // The load was sealed at the farm. The security officer reads the code off the seal; only the server knows the right answer.
+      const job = row.shipment.collectionJob;
+      if (job.sealCode) {
+        const lockedUntil = sealLockedUntil(job.sealFailedAttempts, job.sealLastFailedAt, now);
+        if (lockedUntil) {
+          throw new AppError(429, 'SEAL_LOCKED', 'Too many wrong seal codes. Hold the vehicle for the purchase manager, or try again later.', { retryAt: lockedUntil });
+        }
+        if (!input.sealCode) throw new AppError(400, 'SEAL_CODE_REQUIRED', 'Enter the code printed on the seal');
+        if (!sealCodesMatch(job.sealCode, input.sealCode)) throw new SealMismatchError();
+        if (job.sealFailedAttempts > 0) await tx.collectionJob.update({ where: { id: job.id }, data: { sealFailedAttempts: 0, sealLastFailedAt: null } });
+      }
     }
 
     await tx.gateEvent.create({ data: { shipmentId: row.shipmentId, bookingId, type: EVENT_FOR[action], actorId: actor.id, reason: input.reason ?? null } });

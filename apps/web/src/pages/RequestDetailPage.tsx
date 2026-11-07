@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
-import { AssignBothDialog, AssignInspectionDialog, AssignTransportDialog } from '../components/AssignDialogs';
+import { AssignInspectionDialog, AssignTransportDialog } from '../components/AssignDialogs';
 import { ReasonDialog } from '../components/ReasonDialog';
 import { Alert, Button, Card, Dialog, PageHeader, Pill, SelectField, Spinner, StatusBadge, TextAreaField, TextField } from '../components/ui';
 import { useAmend, useCancel, useDecision, useRequest, useResubmit } from '../features/procurement/hooks';
@@ -13,7 +13,6 @@ import {
   type AmendableField, type ProcurementRequest,
 } from '../lib/types';
 import { formatKg } from '../lib/format';
-import { isCollectionActive } from '../lib/workflow';
 import { CollectionStatusPill } from './CollectionPages';
 import { InspectionStatusPill } from './InspectionPages';
 
@@ -82,7 +81,7 @@ function AmendDialog({ request, open, onClose }: { request: ProcurementRequest; 
   );
 }
 
-type DialogKind = 'approve' | 'reject' | 'clarify' | 'cancel' | 'resubmit' | 'amend' | 'assignInspection' | 'assignTransport' | 'assignBoth' | null;
+type DialogKind = 'approve' | 'reject' | 'clarify' | 'cancel' | 'resubmit' | 'amend' | 'assignInspection' | 'assignTransport' | null;
 
 function Actions({ request }: { request: ProcurementRequest }) {
   const { user } = useAuth();
@@ -97,18 +96,16 @@ function Actions({ request }: { request: ProcurementRequest }) {
   const s = request.status;
   const canDecide = role === 'PURCHASE_MANAGER' && s === 'SUBMITTED';
   const canCancel = role === 'FARMER' ? FARMER_CANCELLABLE.includes(s) : role === 'PURCHASE_MANAGER' && STAFF_CANCELLABLE.includes(s);
-  // Transport is assigned together with the field officer; it does not wait for the inspection result.
-  const hasActiveTransport = request.collections.some((c) => isCollectionActive(c.status));
+  // Sequence: the manager assigns a field officer first; transport is assigned only after the inspection passes.
   const isManager = role === 'PURCHASE_MANAGER';
-  const canAssignBoth = isManager && s === 'APPROVED' && !hasActiveTransport;
-  const canAssignInspection = isManager && s === 'APPROVED' && hasActiveTransport;
-  const canAssignTransport = isManager && (s === 'INSPECTION_ASSIGNED' || s === 'INSPECTION_PASSED') && !hasActiveTransport;
+  const canAssignInspection = isManager && s === 'APPROVED';
+  const canAssignTransport = isManager && s === 'INSPECTION_PASSED';
   const decisionInspection = role === 'PURCHASE_MANAGER' && (s === 'INSPECTION_FAILED' || s === 'INSPECTION_REVIEW') ? request.inspections.filter((i) => i.status === 'COMPLETED').at(-1) : undefined;
   const canResubmit = role === 'FARMER' && s === 'CLARIFICATION_REQUESTED';
   // Only the purchase manager changes declared prawn details; farmers reply and resubmit.
   const canAmend = isManager && (s === 'SUBMITTED' || s === 'CLARIFICATION_REQUESTED');
 
-  if (!canDecide && !canCancel && !canResubmit && !canAmend && !canAssignBoth && !canAssignInspection && !canAssignTransport && !decisionInspection) return null;
+  if (!canDecide && !canCancel && !canResubmit && !canAmend && !canAssignInspection && !canAssignTransport && !decisionInspection) return null;
 
   return (
     <Card>
@@ -125,7 +122,6 @@ function Actions({ request }: { request: ProcurementRequest }) {
             </Button>
           </>
         )}
-        {canAssignBoth && <Button onClick={() => setDialog('assignBoth')}>Assign field officer &amp; transport</Button>}
         {canAssignInspection && <Button onClick={() => setDialog('assignInspection')}>Assign field officer</Button>}
         {canAssignTransport && <Button onClick={() => setDialog('assignTransport')}>Assign transport</Button>}
         {decisionInspection && (
@@ -196,7 +192,6 @@ function Actions({ request }: { request: ProcurementRequest }) {
         onConfirm={(note) => resubmit.mutateAsync(note ? { note } : {})}
       />
       <AmendDialog request={request} open={dialog === 'amend'} onClose={close} />
-      <AssignBothDialog requestId={request.id} open={dialog === 'assignBoth'} onClose={close} />
       <AssignInspectionDialog requestId={request.id} open={dialog === 'assignInspection'} onClose={close} />
       <AssignTransportDialog requestId={request.id} open={dialog === 'assignTransport'} onClose={close} />
     </Card>

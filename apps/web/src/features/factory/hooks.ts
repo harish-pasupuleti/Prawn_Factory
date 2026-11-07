@@ -55,7 +55,7 @@ const PATH: Record<GateAction, string> = {
   arrive: 'arrive', verify: 'verify', hold: 'hold', reject: 'reject', admit: 'admit', exit: 'exit', releaseHold: 'release-hold', override: 'override',
 };
 export const useGateAction = () =>
-  useAction(({ bookingId, action, ...body }: { bookingId: string; action: GateAction; registrationNumber?: string; reason?: string }) =>
+  useAction(({ bookingId, action, ...body }: { bookingId: string; action: GateAction; registrationNumber?: string; sealCode?: string; reason?: string }) =>
     post<Booking>(`/bookings/${bookingId}/${PATH[action]}`, body),
   );
 
