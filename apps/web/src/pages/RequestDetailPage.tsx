@@ -5,6 +5,9 @@ import { AssignInspectionDialog, AssignTransportDialog } from '../components/Ass
 import { ReasonDialog } from '../components/ReasonDialog';
 import { Alert, Button, Card, Dialog, PageHeader, Pill, SelectField, Spinner, StatusBadge, TextAreaField, TextField } from '../components/ui';
 import { useAmend, useCancel, useDecision, useRequest, useResubmit } from '../features/procurement/hooks';
+import { BoxPlanCard } from '../components/BoxPlanCard';
+import { PaymentLine } from '../components/PaymentParts';
+import { usePayments } from '../features/payments/hooks';
 import { ApiError } from '../lib/api';
 import { errorMessage } from '../lib/errors';
 import { formatDateTime, formatFieldValue } from '../lib/format';
@@ -15,6 +18,24 @@ import {
 import { formatKg } from '../lib/format';
 import { CollectionStatusPill } from './CollectionPages';
 import { InspectionStatusPill } from './InspectionPages';
+
+/** Box requirements can be set from approval until the shipment is received. */
+const BOX_PLAN_STATUSES: string[] = ['APPROVED', 'INSPECTION_ASSIGNED', 'INSPECTION_PASSED', 'INSPECTION_FAILED', 'INSPECTION_REVIEW', 'TRANSPORT_ASSIGNED', 'IN_TRANSIT', 'DELIVERED', 'RECEIVED'];
+
+/** Payment status for this request's delivery. Only appears once the prawns have reached the factory. */
+function RequestPayments({ requestId, manager }: { requestId: string; manager: boolean }) {
+  const q = usePayments({ requestId, pageSize: 5 });
+  if (!q.data || q.data.items.length === 0) return null;
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold">Payment</h2>
+        {manager && q.data.items.some((p) => p.state === 'AWAITING_DECISION' || p.canSettle) && <Link className="text-sm font-medium text-teal-800 underline" to="/payments">Choose Pay Now or Pay Later</Link>}
+      </div>
+      <ul className="divide-y divide-slate-100">{q.data.items.map((p) => <PaymentLine key={p.shipmentId} p={p} />)}</ul>
+    </Card>
+  );
+}
 
 function AmendDialog({ request, open, onClose }: { request: ProcurementRequest; open: boolean; onClose: () => void }) {
   const amend = useAmend(request.id);
@@ -229,6 +250,8 @@ function buildTimeline(r: ProcurementRequest): TimelineItem[] {
 
 export function RequestDetailPage() {
   const { id } = useParams();
+  const { user } = useAuth();
+  const role = user?.role;
   const { data: request, isLoading, isError, error } = useRequest(id);
 
   if (isLoading) return <Spinner label="Loading request" />;
@@ -257,6 +280,9 @@ export function RequestDetailPage() {
           <Alert tone="warning">Clarification requested: {request.lastStatusChange.reason}</Alert>
         )}
         {request.status === 'REJECTED' && request.lastStatusChange?.reason && <Alert tone="error">Rejected: {request.lastStatusChange.reason}</Alert>}
+
+        <RequestPayments requestId={request.id} manager={role === 'PURCHASE_MANAGER'} />
+        {(role === 'PURCHASE_MANAGER' || role === 'ADMIN') && BOX_PLAN_STATUSES.includes(request.status) && <BoxPlanCard requestId={request.id} canEdit={role === 'PURCHASE_MANAGER'} />}
 
         <div className="grid gap-6 lg:grid-cols-3">
           <Card className="lg:col-span-2">

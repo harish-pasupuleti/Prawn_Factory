@@ -126,6 +126,29 @@ enum ExceptionEventType {
   RESOLVED
 }
 
+/**
+ * How the prawns are processed: with the head on, or headless.
+ */
+enum BoxForm {
+  HEAD_ON
+  HEADLESS
+}
+
+enum BoxStatus {
+  PACKED
+  VOID
+}
+
+enum PaymentOption {
+  PAY_NOW
+  PAY_LATER
+}
+
+enum PaymentStatus {
+  PAY_LATER
+  PAID
+}
+
 enum QueueStatus {
   QUEUED
   IN_PROGRESS
@@ -133,42 +156,45 @@ enum QueueStatus {
 }
 
 model User {
-  id               String    @id @default(uuid()) @db.Uuid
-  email            String    @unique
+  id               String     @id @default(uuid()) @db.Uuid
+  email            String     @unique
   passwordHash     String
   fullName         String
   role             Role
   status           UserStatus @default(ACTIVE)
-  failedLoginCount Int       @default(0)
+  failedLoginCount Int        @default(0)
   lockedUntil      DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 
-  farmerProfile    FarmerProfile?
-  sessions         RefreshSession[]
-  statusChanges    ProcurementRequest[]   @relation("RequestStatusChangedBy")
-  amendments       ProcurementAmendment[]
-  auditEvents      AuditEvent[]
+  farmerProfile FarmerProfile?
+  sessions      RefreshSession[]
+  statusChanges ProcurementRequest[]   @relation("RequestStatusChangedBy")
+  amendments    ProcurementAmendment[]
+  auditEvents   AuditEvent[]
 
-  inspectionsAssigned  FieldInspection[]      @relation("InspectionOfficer")
-  inspectionsCreated   FieldInspection[]      @relation("InspectionAssigner")
+  inspectionsAssigned  FieldInspection[]    @relation("InspectionOfficer")
+  inspectionsCreated   FieldInspection[]    @relation("InspectionAssigner")
   inspectionDecisions  InspectionDecision[]
-  collectionsAsOfficer CollectionJob[]        @relation("CollectionOfficer")
-  collectionsCreated   CollectionJob[]        @relation("CollectionAssigner")
+  collectionsAsOfficer CollectionJob[]      @relation("CollectionOfficer")
+  collectionsCreated   CollectionJob[]      @relation("CollectionAssigner")
   incidentsReported    CollectionIncident[]
-  collectionsSealed    CollectionJob[]        @relation("CollectionSealer")
+  collectionsSealed    CollectionJob[]      @relation("CollectionSealer")
   photosUploaded       CollectionPhoto[]
+  boxRequirementsSet   BoxRequirement[]
+  boxesPacked          PackedBox[]
+  paymentsDecided      Payment[]
   slotsCreated         FactorySlot[]
   bookingsReserved     SlotBooking[]
   gateEvents           GateEvent[]
   weightsRecorded      WeightMeasurement[]
-  shipmentsReceived    Shipment[]            @relation("ShipmentReceiver")
-  exceptionsRaised     ExceptionCase[]       @relation("ExceptionRaiser")
-  exceptionsResolved   ExceptionCase[]       @relation("ExceptionResolver")
+  shipmentsReceived    Shipment[]           @relation("ShipmentReceiver")
+  exceptionsRaised     ExceptionCase[]      @relation("ExceptionRaiser")
+  exceptionsResolved   ExceptionCase[]      @relation("ExceptionResolver")
   exceptionEvents      ExceptionEvent[]
-  queueReleased        QueueEntry[]          @relation("QueueReleaser")
-  queueStarted         QueueEntry[]          @relation("QueueStarter")
-  queueCompleted       QueueEntry[]          @relation("QueueCompleter")
+  queueReleased        QueueEntry[]         @relation("QueueReleaser")
+  queueStarted         QueueEntry[]         @relation("QueueStarter")
+  queueCompleted       QueueEntry[]         @relation("QueueCompleter")
 
   @@index([role, status])
 }
@@ -183,8 +209,8 @@ model FarmerProfile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user      User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
-  requests  ProcurementRequest[]
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  requests ProcurementRequest[]
 }
 
 model RefreshSession {
@@ -195,7 +221,7 @@ model RefreshSession {
   revokedAt DateTime?
   createdAt DateTime  @default(now())
 
-  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@index([userId])
 }
@@ -219,14 +245,16 @@ model ProcurementRequest {
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
-  farmer          FarmerProfile          @relation(fields: [farmerId], references: [id], onDelete: Restrict)
-  statusChangedBy User?                  @relation("RequestStatusChangedBy", fields: [statusChangedById], references: [id], onDelete: Restrict)
-  amendments      ProcurementAmendment[]
+  farmer              FarmerProfile          @relation(fields: [farmerId], references: [id], onDelete: Restrict)
+  statusChangedBy     User?                  @relation("RequestStatusChangedBy", fields: [statusChangedById], references: [id], onDelete: Restrict)
+  amendments          ProcurementAmendment[]
   inspections         FieldInspection[]
   inspectionDecisions InspectionDecision[]
   collections         CollectionJob[]
   shipments           Shipment[]
   exceptions          ExceptionCase[]
+  boxRequirements     BoxRequirement[]
+  payments            Payment[]
 
   @@index([farmerId, createdAt])
   @@index([status, createdAt])
@@ -243,8 +271,8 @@ model ProcurementAmendment {
   actorId   String   @db.Uuid
   createdAt DateTime @default(now())
 
-  request   ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
-  actor     User               @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  request ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  actor   User               @relation(fields: [actorId], references: [id], onDelete: Restrict)
 
   @@index([requestId, seq])
 }
@@ -261,7 +289,7 @@ model AuditEvent {
   ip         String?
   createdAt  DateTime @default(now())
 
-  actor      User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: Restrict)
 
   @@index([entityType, entityId])
   @@index([actorId])
@@ -277,36 +305,36 @@ model Vehicle {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  collections        CollectionJob[]
+  collections CollectionJob[]
 }
 
 // One row per inspection attempt. inspectedQuantityKg is separate from the farmer's declared quantity
 // and from the collected quantity; none of the three is ever overwritten by another.
 model FieldInspection {
-  id                             String            @id @default(uuid()) @db.Uuid
-  requestId                      String            @db.Uuid
-  officerId                      String            @db.Uuid
-  assignedById                   String            @db.Uuid
-  status                         InspectionStatus  @default(ASSIGNED)
-  assignedAt                     DateTime          @default(now())
+  id                             String             @id @default(uuid()) @db.Uuid
+  requestId                      String             @db.Uuid
+  officerId                      String             @db.Uuid
+  assignedById                   String             @db.Uuid
+  status                         InspectionStatus   @default(ASSIGNED)
+  assignedAt                     DateTime           @default(now())
   startedAt                      DateTime?
   completedAt                    DateTime?
   outcome                        InspectionOutcome?
   observedSpecies                String?
   observedSizeCount              String?
-  inspectedQuantityKg            Decimal?          @db.Decimal(12, 3)
-  declaredQuantityKgAtInspection Decimal?          @db.Decimal(12, 3)
-  quantityVariancePct            Decimal?          @db.Decimal(12, 2)
+  inspectedQuantityKg            Decimal?           @db.Decimal(12, 3)
+  declaredQuantityKgAtInspection Decimal?           @db.Decimal(12, 3)
+  quantityVariancePct            Decimal?           @db.Decimal(12, 2)
   qualityNotes                   String?
   discrepancyNotes               String?
   cancelReason                   String?
-  createdAt                      DateTime          @default(now())
-  updatedAt                      DateTime          @updatedAt
+  createdAt                      DateTime           @default(now())
+  updatedAt                      DateTime           @updatedAt
 
-  request     ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
-  officer     User               @relation("InspectionOfficer", fields: [officerId], references: [id], onDelete: Restrict)
-  assignedBy  User               @relation("InspectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
-  decision    InspectionDecision?
+  request    ProcurementRequest  @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  officer    User                @relation("InspectionOfficer", fields: [officerId], references: [id], onDelete: Restrict)
+  assignedBy User                @relation("InspectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
+  decision   InspectionDecision?
 
   @@index([requestId, createdAt])
   @@index([officerId, status])
@@ -323,9 +351,9 @@ model InspectionDecision {
   decidedById  String                 @db.Uuid
   createdAt    DateTime               @default(now())
 
-  request      ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
-  inspection   FieldInspection    @relation(fields: [inspectionId], references: [id], onDelete: Restrict)
-  decidedBy    User               @relation(fields: [decidedById], references: [id], onDelete: Restrict)
+  request    ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  inspection FieldInspection    @relation(fields: [inspectionId], references: [id], onDelete: Restrict)
+  decidedBy  User               @relation(fields: [decidedById], references: [id], onDelete: Restrict)
 
   @@index([requestId])
 }
@@ -351,22 +379,22 @@ model CollectionJob {
   cancelReason        String?
   // Seal applied by the field officer after loading. The code is never shown to the transport or security officer;
   // the security officer must type it at the gate and the server compares it.
-  sealCode           String?          @unique
-  sealedAt           DateTime?
-  sealedById         String?          @db.Uuid
-  sealFailedAttempts Int              @default(0)
-  sealLastFailedAt   DateTime?
+  sealCode            String?          @unique
+  sealedAt            DateTime?
+  sealedById          String?          @db.Uuid
+  sealFailedAttempts  Int              @default(0)
+  sealLastFailedAt    DateTime?
   createdAt           DateTime         @default(now())
   updatedAt           DateTime         @updatedAt
 
-  request           ProcurementRequest   @relation(fields: [requestId], references: [id], onDelete: Restrict)
-  transportOfficer  User                 @relation("CollectionOfficer", fields: [transportOfficerId], references: [id], onDelete: Restrict)
-  assignedBy        User                 @relation("CollectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
-  vehicle           Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
-  sealedBy          User?                @relation("CollectionSealer", fields: [sealedById], references: [id], onDelete: Restrict)
-  incidents         CollectionIncident[]
-  photos            CollectionPhoto[]
-  shipment          Shipment?
+  request          ProcurementRequest   @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  transportOfficer User                 @relation("CollectionOfficer", fields: [transportOfficerId], references: [id], onDelete: Restrict)
+  assignedBy       User                 @relation("CollectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
+  vehicle          Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  sealedBy         User?                @relation("CollectionSealer", fields: [sealedById], references: [id], onDelete: Restrict)
+  incidents        CollectionIncident[]
+  photos           CollectionPhoto[]
+  shipment         Shipment?
 
   @@index([requestId, createdAt])
   @@index([transportOfficerId, status])
@@ -384,8 +412,8 @@ model CollectionIncident {
   quantityAffectedKg Decimal?     @db.Decimal(12, 3)
   createdAt          DateTime     @default(now())
 
-  collectionJob      CollectionJob @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
-  reporter           User          @relation(fields: [reporterId], references: [id], onDelete: Restrict)
+  collectionJob CollectionJob @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
+  reporter      User          @relation(fields: [reporterId], references: [id], onDelete: Restrict)
 
   @@index([collectionJobId, createdAt])
 }
@@ -400,8 +428,8 @@ model FactorySlot {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
-  bookings    SlotBooking[]
+  createdBy User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  bookings  SlotBooking[]
 
   @@unique([startsAt, endsAt])
   @@index([startsAt])
@@ -420,37 +448,42 @@ model Shipment {
   receivedAt         DateTime?
   receivedById       String?        @db.Uuid
   releasedAt         DateTime?
+  // The purchase manager signs off the packing once every box on the purchase order is packed and numbered.
+  packingApprovedAt  DateTime?
+  packingNote        String?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
-  request       ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
-  collectionJob CollectionJob      @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
-  receivedBy    User?              @relation("ShipmentReceiver", fields: [receivedById], references: [id], onDelete: Restrict)
+  request       ProcurementRequest  @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  collectionJob CollectionJob       @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
+  receivedBy    User?               @relation("ShipmentReceiver", fields: [receivedById], references: [id], onDelete: Restrict)
   bookings      SlotBooking[]
   gateEvents    GateEvent[]
   weights       WeightMeasurement[]
   exceptions    ExceptionCase[]
   queueEntry    QueueEntry?
+  boxes         PackedBox[]
+  payment       Payment?
 
   @@index([requestId])
   @@index([status])
 }
 
 model SlotBooking {
-  id                 String        @id @default(uuid()) @db.Uuid
-  shipmentId         String        @db.Uuid
-  slotId             String        @db.Uuid
-  status             BookingStatus @default(RESERVED)
-  reservedById       String        @db.Uuid
-  reason             String?
-  rescheduledFromId  String?       @db.Uuid
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  id                String        @id @default(uuid()) @db.Uuid
+  shipmentId        String        @db.Uuid
+  slotId            String        @db.Uuid
+  status            BookingStatus @default(RESERVED)
+  reservedById      String        @db.Uuid
+  reason            String?
+  rescheduledFromId String?       @db.Uuid
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 
-  shipment    Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
-  slot        FactorySlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
-  reservedBy  User        @relation(fields: [reservedById], references: [id], onDelete: Restrict)
-  gateEvents  GateEvent[]
+  shipment   Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  slot       FactorySlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
+  reservedBy User        @relation(fields: [reservedById], references: [id], onDelete: Restrict)
+  gateEvents GateEvent[]
 
   @@index([slotId, status])
   @@index([shipmentId, createdAt])
@@ -466,9 +499,9 @@ model GateEvent {
   reason     String?
   createdAt  DateTime      @default(now())
 
-  shipment   Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
-  booking    SlotBooking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
-  actor      User        @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  shipment Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  booking  SlotBooking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  actor    User        @relation(fields: [actorId], references: [id], onDelete: Restrict)
 
   @@index([shipmentId, createdAt])
   @@index([bookingId])
@@ -509,11 +542,11 @@ model ExceptionCase {
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
-  shipment     Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
-  request      ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
-  raisedBy     User               @relation("ExceptionRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
-  resolvedBy   User?              @relation("ExceptionResolver", fields: [resolvedById], references: [id], onDelete: Restrict)
-  events       ExceptionEvent[]
+  shipment   Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  request    ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  raisedBy   User               @relation("ExceptionRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  resolvedBy User?              @relation("ExceptionResolver", fields: [resolvedById], references: [id], onDelete: Restrict)
+  events     ExceptionEvent[]
 
   @@index([status, createdAt])
   @@index([shipmentId])
@@ -528,8 +561,8 @@ model ExceptionEvent {
   note        String
   createdAt   DateTime           @default(now())
 
-  exception   ExceptionCase @relation(fields: [exceptionId], references: [id], onDelete: Restrict)
-  actor       User          @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  exception ExceptionCase @relation(fields: [exceptionId], references: [id], onDelete: Restrict)
+  actor     User          @relation(fields: [actorId], references: [id], onDelete: Restrict)
 
   @@index([exceptionId, createdAt])
 }
@@ -541,7 +574,7 @@ model ProcessingStation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  entries   QueueEntry[]
+  entries QueueEntry[]
 }
 
 // Timers are NOT stored. They are computed from startedAt and targetDurationMin using server time,
@@ -570,7 +603,9 @@ model QueueEntry {
   @@index([status, createdAt])
 }
 
-/** Photos taken at the farm by the field officer. Append-only; stored in the database so no extra storage service is needed. */
+/**
+ * Photos taken at the farm by the field officer. Append-only; stored in the database so no extra storage service is needed.
+ */
 model CollectionPhoto {
   id              String   @id @default(uuid()) @db.Uuid
   collectionJobId String   @db.Uuid
@@ -585,4 +620,81 @@ model CollectionPhoto {
   uploadedBy    User          @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
 
   @@index([collectionJobId, createdAt])
+}
+
+/**
+ * What the purchase manager requires from packing: this many boxes of this weight, of this form and size grade.
+ */
+model BoxRequirement {
+  id          String   @id @default(uuid()) @db.Uuid
+  requestId   String   @db.Uuid
+  form        BoxForm
+  sizeGrade   String
+  boxWeightKg Decimal  @db.Decimal(8, 3)
+  quantity    Int
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now())
+
+  request   ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  createdBy User               @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  boxes     PackedBox[]
+
+  @@unique([requestId, form, sizeGrade, boxWeightKg])
+  @@index([requestId])
+}
+
+/**
+ * One packed box. The purchase manager gives it its unique box number after packing.
+ */
+model PackedBox {
+  id            String    @id @default(uuid()) @db.Uuid
+  shipmentId    String    @db.Uuid
+  requirementId String    @db.Uuid
+  form          BoxForm
+  sizeGrade     String
+  netWeightKg   Decimal   @db.Decimal(8, 3)
+  status        BoxStatus @default(PACKED)
+  boxNumber     String?   @unique
+  numberedAt    DateTime?
+  voidReason    String?
+  voidedAt      DateTime?
+  packedById    String    @db.Uuid
+  packedAt      DateTime  @default(now())
+
+  shipment    Shipment       @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  requirement BoxRequirement @relation(fields: [requirementId], references: [id], onDelete: Restrict)
+  packedBy    User           @relation(fields: [packedById], references: [id], onDelete: Restrict)
+
+  @@index([shipmentId, status])
+  @@index([requirementId])
+}
+
+/**
+ * The purchase manager's payment decision for a delivered shipment, and the invoice once it is paid.
+ */
+model Payment {
+  id            String        @id @default(uuid()) @db.Uuid
+  shipmentId    String        @unique @db.Uuid
+  requestId     String        @db.Uuid
+  option        PaymentOption
+  status        PaymentStatus
+  decidedById   String        @db.Uuid
+  decidedAt     DateTime      @default(now())
+  // Filled when the payment is made (immediately for Pay Now, after processing for Pay Later).
+  invoiceNumber String?       @unique
+  invoicedAt    DateTime?
+  quantityKg    Decimal?      @db.Decimal(12, 3)
+  quantityBasis String?
+  ratePerKg     Decimal?      @db.Decimal(12, 2)
+  amountInr     Decimal?      @db.Decimal(14, 2)
+  method        String?
+  reference     String?
+  paidAt        DateTime?
+
+  shipment  Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  request   ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  decidedBy User               @relation(fields: [decidedById], references: [id], onDelete: Restrict)
+
+  @@index([requestId])
+  @@index([status])
 }

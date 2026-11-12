@@ -15,7 +15,7 @@ export function navItemsFor(role: Role): NavItem[] {
   const dashboard: NavItem = { to: '/', label: 'Dashboard', end: true };
   switch (role) {
     case 'FARMER':
-      return [dashboard, { to: '/requests', label: 'My requests', end: true }, { to: '/requests/new', label: 'New request' }];
+      return [dashboard, { to: '/requests', label: 'My requests', end: true }, { to: '/requests/new', label: 'New request' }, { to: '/payments', label: 'My payments' }];
     case 'PURCHASE_MANAGER':
       return [
         dashboard,
@@ -25,6 +25,8 @@ export function navItemsFor(role: Role): NavItem[] {
         { to: '/schedule', label: 'Arrival schedule' },
         { to: '/shipments', label: 'Shipments' },
         { to: '/queue', label: 'Processing queue' },
+        { to: '/packing', label: 'Grading & packing' },
+        { to: '/payments', label: 'Payments' },
         { to: '/exceptions', label: 'Exceptions' },
         { to: '/factory/slots', label: 'Slots' },
       ];
@@ -35,7 +37,7 @@ export function navItemsFor(role: Role): NavItem[] {
     case 'SECURITY_OFFICER':
       return [dashboard, { to: '/gate', label: 'Gate' }];
     case 'FACTORY_OPERATOR':
-      return [dashboard, { to: '/shipments', label: 'Shipments' }, { to: '/queue', label: 'Processing queue' }];
+      return [dashboard, { to: '/shipments', label: 'Shipments' }, { to: '/queue', label: 'Processing queue' }, { to: '/packing', label: 'Grading & packing' }];
     case 'ADMIN':
       return [
         dashboard,
@@ -45,6 +47,8 @@ export function navItemsFor(role: Role): NavItem[] {
         { to: '/schedule', label: 'Arrival schedule' },
         { to: '/shipments', label: 'Shipments' },
         { to: '/queue', label: 'Processing queue' },
+        { to: '/packing', label: 'Grading & packing' },
+        { to: '/payments', label: 'Payments' },
         { to: '/exceptions', label: 'Exceptions' },
         { to: '/factory/slots', label: 'Slots & stations' },
         { to: '/vehicles', label: 'Vehicles' },

@@ -115,7 +115,7 @@ describe('collection screen', () => {
       ['ASSIGNED', 'Confirm pickup'], ['LOADED', 'Dispatch to factory'], ['DISPATCHED', 'Mark arrived at factory'], ['ARRIVED', 'Record handover'],
     ];
     for (const [status, label] of cases) {
-      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status) }) });
+      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status, { sealed: true }) }) });
       const { unmount } = page();
       expect(await screen.findByRole('button', { name: label })).toBeInTheDocument();
       expect(screen.getAllByRole('button').filter((b) => /Confirm pickup|Dispatch to factory|Mark arrived|Record handover|Record loading/.test(b.textContent ?? ''))).toHaveLength(1);
@@ -149,7 +149,7 @@ describe('collection screen', () => {
   });
 
   it('requires an expected arrival time to dispatch when none was set', async () => {
-    api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture('LOADED', { expectedArrivalAt: null }) }) });
+    api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture('LOADED', { expectedArrivalAt: null, sealed: true }) }) });
     page();
     expect(await screen.findByRole('button', { name: 'Dispatch to factory' })).toBeDisabled();
   });

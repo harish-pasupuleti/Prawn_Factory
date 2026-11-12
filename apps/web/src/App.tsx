@@ -10,6 +10,8 @@ import { FactorySetupPage } from './pages/FactorySetupPage';
 import { GatePage } from './pages/GatePage';
 import { ForbiddenPage, NotFoundPage } from './pages/MiscPages';
 import { NewRequestPage } from './pages/NewRequestPage';
+import { PackingDetailPage, PackingPage } from './pages/PackingPages';
+import { InvoicePage, PaymentsPage } from './pages/PaymentPages';
 import { QueuePage } from './pages/QueuePage';
 import { RequestDetailPage } from './pages/RequestDetailPage';
 import { RequestsPage } from './pages/RequestsPage';
@@ -56,6 +58,12 @@ export function App() {
             <Route path="shipments" element={<ShipmentsPage />} />
             <Route path="shipments/:id" element={<ShipmentDetailPage />} />
             <Route path="queue" element={<QueuePage />} />
+            <Route path="packing" element={<PackingPage />} />
+            <Route path="packing/:shipmentId" element={<PackingDetailPage />} />
+          </Route>
+          <Route element={<RequireAuth roles={['FARMER', 'PURCHASE_MANAGER', 'ADMIN']} />}>
+            <Route path="payments" element={<PaymentsPage />} />
+            <Route path="payments/:shipmentId/invoice" element={<InvoicePage />} />
           </Route>
           <Route element={<RequireAuth roles={['ADMIN']} />}>
             <Route path="vehicles" element={<VehiclesPage />} />

@@ -1,8 +1,10 @@
 import { Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { PaymentLine } from '../components/PaymentParts';
 import { Alert, Card, EmptyState, PageHeader, Spinner, StatusBadge } from '../components/ui';
 import { useBookings, useExceptions, useQueue, useShipments, useTicker } from '../features/factory/hooks';
 import { useCollections, useInspections } from '../features/fieldwork/hooks';
+import { usePayments } from '../features/payments/hooks';
 import { useRequests, useRequestStats } from '../features/procurement/hooks';
 import { errorMessage } from '../lib/errors';
 import { formatDateTime, formatKg } from '../lib/format';
@@ -104,6 +106,35 @@ function OperatorDashboard() {
   );
 }
 
+/** The farmer's payment status for each delivery, with the invoice once paid. */
+function FarmerPayments() {
+  const q = usePayments({ pageSize: 5 });
+  if (q.isLoading || !q.data || q.data.items.length === 0) return null;
+  return (
+    <Card>
+      <div className="mb-1 flex items-center justify-between">
+        <h2 className="text-base font-semibold">Payments</h2>
+        <Link to="/payments" className="text-sm font-medium text-teal-800 underline">View all</Link>
+      </div>
+      <ul className="divide-y divide-slate-100">{q.data.items.map((p) => <PaymentLine key={p.shipmentId} p={p} showRequest />)}</ul>
+    </Card>
+  );
+}
+
+/** For the purchase manager: deliveries waiting for Pay Now or Pay Later, and Pay Later ones that can now be paid. */
+function PaymentsToDecide() {
+  const waiting = usePayments({ state: 'AWAITING_DECISION', pageSize: 1 });
+  const later = usePayments({ state: 'PAY_LATER', pageSize: 50 });
+  const ready = later.data?.items.filter((p) => p.canSettle).length ?? 0;
+  if (!waiting.data) return null;
+  return (
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <StatCard label="Payment decision needed" value={waiting.data.meta.total} tone="alert" to="/payments?state=AWAITING_DECISION" />
+      <StatCard label="Pay later, ready to pay" value={ready} to="/payments?state=PAY_LATER" />
+    </div>
+  );
+}
+
 function ProcurementDashboard({ scope }: { scope: 'own' | 'all' }) {
   const stats = useRequestStats();
   const recent = useRequests({ page: 1, pageSize: 5, sort: 'createdAt', order: 'desc' });
@@ -117,6 +148,8 @@ function ProcurementDashboard({ scope }: { scope: 'own' | 'all' }) {
   return (
     <div className="space-y-6">
       {manager && <ManagerFactoryStrip />}
+      {manager && <PaymentsToDecide />}
+      {scope === 'own' && <FarmerPayments />}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         <StatCard label={scope === 'own' ? 'My requests' : 'All requests'} value={data.total} />
         <StatCard label="Awaiting review" value={summary.awaitingReview} to="/requests?status=SUBMITTED" />

@@ -80,7 +80,7 @@ export function refreshSession(): Promise<SessionPayload | null> {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT';
   body?: unknown;
   /** Multipart upload (photos). The browser sets the Content-Type boundary itself. */
   form?: FormData;

@@ -14,6 +14,8 @@ import { authRouter, type AuthRouterOptions } from './modules/auth/routes';
 import { collectionsRouter } from './modules/collections/routes';
 import { bookingsRouter, exceptionsRouter, queueRouter, shipmentsRouter, slotsRouter, stationsRouter } from './modules/factory/routes';
 import { inspectionsRouter } from './modules/inspections/routes';
+import { packingRouter } from './modules/packing/routes';
+import { paymentsRouter } from './modules/payments/routes';
 import { procurementRouter } from './modules/procurement/routes';
 import { usersRouter } from './modules/users/routes';
 import { vehiclesRouter } from './modules/vehicles/routes';
@@ -56,6 +58,8 @@ export function createApp(options: AuthRouterOptions = {}): Express {
   v1.use('/shipments', shipmentsRouter());
   v1.use('/exceptions', exceptionsRouter());
   v1.use('/stations', stationsRouter());
+  v1.use('/packing', packingRouter());
+  v1.use('/payments', paymentsRouter());
   v1.use('/queue', queueRouter());
   app.use('/api/v1', v1);
 
