@@ -3,12 +3,14 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '../../src/lib/prisma';
 import {
   approvedRequest, assignedCollection, createStaff, createUser, createVehicle, get, hoursFromNow, loginAs,
-  newDriver, passedRequest, post, requestStatus, sealLoad, type Staff,
+  admitAtGate, createFactoryStaff, newDriver, passedRequest, post, requestStatus, sealLoad, type FactoryStaff, type Staff,
 } from './helpers';
 
 let staff: Staff;
+let fs: FactoryStaff;
 beforeAll(async () => {
   staff = await createStaff();
+  fs = await createFactoryStaff();
 });
 
 const assignTo = (requestId: string, body: Record<string, unknown>, token = staff.managerToken) =>
@@ -112,7 +114,7 @@ describe('transport steps', () => {
     const unsealed = await post(r.driverToken, `${base}/dispatch`);
     expect(unsealed.status).toBe(409);
     expect(unsealed.body.error.code).toBe('SEAL_REQUIRED');
-    await sealLoad(staff, r.collectionId);
+    const sealCode = await sealLoad(staff, r.collectionId);
 
     const dispatched = await post(r.driverToken, `${base}/dispatch`);
     expect(dispatched.status).toBe(200);
@@ -120,6 +122,11 @@ describe('transport steps', () => {
 
     expect((await post(r.driverToken, `${base}/handover`)).status).toBe(409); // must arrive first
     expect((await post(r.driverToken, `${base}/arrive`)).status).toBe(200);
+    // No arrival slot and no gate clearance yet, so the hand-over is not allowed.
+    const early = await post(r.driverToken, `${base}/handover`);
+    expect(early.status).toBe(409);
+    expect(early.body.error.code).toBe('NOT_BOOKED');
+    await admitAtGate(staff, fs, r.collectionId, v.registrationNumber, sealCode);
     const done = await post(r.driverToken, `${base}/handover`, { notes: 'Handed to gate supervisor' });
     expect(done.status).toBe(200);
     expect(done.body.data.status).toBe('HANDED_OVER');
@@ -188,10 +195,11 @@ describe('transport steps', () => {
     const base = `/collections/${r.collectionId}`;
     await post(r.driverToken, `${base}/pickup`);
     await post(r.driverToken, `${base}/load`, { collectedQuantityKg: '400' });
-    await sealLoad(staff, r.collectionId);
+    const sealCode = await sealLoad(staff, r.collectionId);
     await post(r.driverToken, `${base}/dispatch`);
     await post(r.driverToken, `${base}/arrive`);
-    await post(r.driverToken, `${base}/handover`);
+    await admitAtGate(staff, fs, r.collectionId, v.registrationNumber, sealCode);
+    expect((await post(r.driverToken, `${base}/handover`)).status).toBe(200);
     const next = await passedRequest(staff);
     expect((await assignTo(next.id, { transportOfficerId: r.driver.id, vehicleId: v.id })).status).toBe(201);
   });

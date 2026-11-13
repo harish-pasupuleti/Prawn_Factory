@@ -115,7 +115,7 @@ describe('collection screen', () => {
       ['ASSIGNED', 'Confirm pickup'], ['LOADED', 'Dispatch to factory'], ['DISPATCHED', 'Mark arrived at factory'], ['ARRIVED', 'Record handover'],
     ];
     for (const [status, label] of cases) {
-      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status, { sealed: true }) }) });
+      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status, { sealed: true, shipment: { id: 's1', code: 'SH-2026-000001', status: 'ADMITTED', booking: null } }) }) });
       const { unmount } = page();
       expect(await screen.findByRole('button', { name: label })).toBeInTheDocument();
       expect(screen.getAllByRole('button').filter((b) => /Confirm pickup|Dispatch to factory|Mark arrived|Record handover|Record loading/.test(b.textContent ?? ''))).toHaveLength(1);
@@ -146,6 +146,13 @@ describe('collection screen', () => {
     await userEvent.click(button);
     expect(await screen.findByText(/Add a note explaining why/)).toBeInTheDocument();
     expect(bodies(fn, '/load')[0]).toEqual({ collectedQuantityKg: '250' });
+  });
+
+  it('offers the handover only once the security officer has admitted the vehicle', async () => {
+    api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture('ARRIVED', { shipment: { id: 's1', code: 'SH-2026-000001', status: 'EXPECTED', booking: { id: 'b1', status: 'CHECKED_IN', startsAt: '2026-11-13T10:00:00Z', endsAt: '2026-11-13T11:00:00Z' } } }) }) });
+    page();
+    expect(await screen.findByText(/Waiting for the security officer to verify and admit/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Record handover' })).not.toBeInTheDocument();
   });
 
   it('requires an expected arrival time to dispatch when none was set', async () => {
