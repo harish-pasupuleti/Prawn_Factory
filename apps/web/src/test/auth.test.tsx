@@ -84,16 +84,16 @@ describe('route protection and navigation', () => {
 
   it('offers each role only its own navigation', () => {
     const labels = (role: (typeof ROLES)[number]) => navItemsFor(role).map((i) => i.label);
-    expect(labels('FARMER')).toEqual(['Dashboard', 'My requests', 'New request']);
+    expect(labels('FARMER')).toEqual(['Dashboard', 'My requests', 'New request', 'My payments']);
     expect(labels('PURCHASE_MANAGER')).toEqual([
-      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Exceptions', 'Slots',
+      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Grading & packing', 'Payments', 'Exceptions', 'Slots',
     ]);
     expect(labels('SECURITY_OFFICER')).toEqual(['Dashboard', 'Gate']);
-    expect(labels('FACTORY_OPERATOR')).toEqual(['Dashboard', 'Shipments', 'Processing queue']);
-    expect(labels('FIELD_OFFICER')).toEqual(['Dashboard', 'My inspections']);
+    expect(labels('FACTORY_OPERATOR')).toEqual(['Dashboard', 'Shipments', 'Processing queue', 'Grading & packing']);
+    expect(labels('FIELD_OFFICER')).toEqual(['Dashboard', 'My inspections', 'Collections to attend']);
     expect(labels('TRANSPORT_OFFICER')).toEqual(['Dashboard', 'My collections']);
     expect(labels('ADMIN')).toEqual([
-      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Exceptions',
+      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Grading & packing', 'Payments', 'Exceptions',
       'Slots & stations', 'Vehicles', 'Users',
     ]);
     for (const role of ROLES.filter((r) => r !== 'ADMIN')) {

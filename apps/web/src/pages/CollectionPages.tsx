@@ -304,12 +304,26 @@ export function CollectionDetailPage() {
             {next === 'load' && <LoadForm collection={c} />}
             {next === 'dispatch' && (c.sealed ? <DispatchForm collection={c} /> : <Alert tone="info">Waiting for the field officer to photograph and seal the load. You can dispatch once it is sealed.</Alert>)}
             {next === 'arrive' && <SimpleStep label="Mark arrived at factory" description="Confirm the vehicle has reached the factory gate." run={() => arrive.mutateAsync(undefined)} pending={arrive.isPending} />}
-            {next === 'handover' && (
+            {next === 'handover' && c.shipment?.status !== 'ADMITTED' && (
+              <Alert tone="info">
+                {c.shipment?.booking
+                  ? 'Waiting for the security officer to verify and admit your vehicle at the gate. Handover opens once it is admitted.'
+                  : 'Waiting for the purchase manager to book your arrival slot. The security officer can only verify your vehicle once it is booked.'}
+              </Alert>
+            )}
+            {next === 'handover' && c.shipment?.status === 'ADMITTED' && (
               <SimpleStep label="Record handover" description="Confirm the consignment has been handed over to factory staff. This completes your job." run={() => handover.mutateAsync(handoverNote.trim() ? { notes: handoverNote.trim() } : {})} pending={handover.isPending}>
                 <TextAreaField label="Handover note (optional)" rows={2} value={handoverNote} onChange={(e) => setHandoverNote(e.target.value)} />
               </SimpleStep>
             )}
           </Card>
+        )}
+
+        {user?.role === 'PURCHASE_MANAGER' && isCollectionActive(c.status) && !c.shipment?.booking && (
+          <Alert tone="warning">
+            No arrival slot is booked for this vehicle, so the security officer cannot see it at the gate and the driver cannot hand over.{' '}
+            <Link className="font-medium underline" to="/schedule">Book an arrival slot</Link>.
+          </Alert>
         )}
 
         <FieldEvidence collection={c} role={user?.role ?? ''} />

@@ -1,0 +1,209 @@
+From 0364b93449061ced9722e084fede69b7fa4f9266 Mon Sep 17 00:00:00 2001
+From: claude <claude@example.com>
+Date: Fri, 13 Nov 2026 06:55:46 +0000
+Subject: [PATCH] Handover only after the security officer admits the vehicle;
+ tell driver and PM what is being waited for
+
+---
+ apps/api/src/modules/collections/service.ts    | 15 +++++++++++----
+ apps/api/tests/integration/collections.test.ts | 16 ++++++++++++----
+ apps/api/tests/integration/helpers.ts          | 12 ++++++++++++
+ apps/api/tests/integration/seal.test.ts        | 18 ++++++++++++++++++
+ apps/web/src/pages/CollectionPages.tsx         | 16 +++++++++++++++-
+ apps/web/src/test/fieldwork.test.tsx           |  9 ++++++++-
+ 6 files changed, 76 insertions(+), 10 deletions(-)
+
+diff --git a/apps/api/src/modules/collections/service.ts b/apps/api/src/modules/collections/service.ts
+index 9dd7d68..a39b41c 100644
+--- a/apps/api/src/modules/collections/service.ts
++++ b/apps/api/src/modules/collections/service.ts
+@@ -294,10 +294,17 @@ export const arrive = (actor: AuthUser, id: string, ip: string | undefined) =>
+   });
+ 
+ export const handover = (actor: AuthUser, id: string, notes: string | undefined, ip: string | undefined) =>
+-  step(actor, id, 'HANDED_OVER', 'collection.handover', ip, async () => ({
+-    data: { handedOverAt: new Date(), handoverNotes: notes ? notes : null },
+-    requestMove: 'DELIVERED',
+-  }));
++  step(actor, id, 'HANDED_OVER', 'collection.handover', ip, async (tx, job) => {
++    // The hand-over is only possible after the security officer has verified the vehicle and seal and admitted it.
++    const shipment = await tx.shipment.findUnique({ where: { collectionJobId: job.id }, select: { status: true } });
++    if (!shipment) {
++      throw conflict('NOT_BOOKED', 'No arrival slot has been booked for this vehicle yet. The purchase manager must book one so the security officer can verify it at the gate.');
++    }
++    if (shipment.status !== 'ADMITTED') {
++      throw conflict('GATE_NOT_CLEARED', 'The security officer must verify and admit your vehicle at the gate before you can hand over.');
++    }
++    return { data: { handedOverAt: new Date(), handoverNotes: notes ? notes : null }, requestMove: 'DELIVERED' };
++  });
+ 
+ /** Delays, damage and similar events are recorded as append-only incidents; they never alter measurements. */
+ export async function reportIncident(actor: AuthUser, id: string, input: IncidentInput, ip: string | undefined) {
+diff --git a/apps/api/tests/integration/collections.test.ts b/apps/api/tests/integration/collections.test.ts
+index 5e75701..c535c5c 100644
+--- a/apps/api/tests/integration/collections.test.ts
++++ b/apps/api/tests/integration/collections.test.ts
+@@ -3,12 +3,14 @@ import { beforeAll, describe, expect, it } from 'vitest';
+ import { prisma } from '../../src/lib/prisma';
+ import {
+   approvedRequest, assignedCollection, createStaff, createUser, createVehicle, get, hoursFromNow, loginAs,
+-  newDriver, passedRequest, post, requestStatus, sealLoad, type Staff,
++  admitAtGate, createFactoryStaff, newDriver, passedRequest, post, requestStatus, sealLoad, type FactoryStaff, type Staff,
+ } from './helpers';
+ 
+ let staff: Staff;
++let fs: FactoryStaff;
+ beforeAll(async () => {
+   staff = await createStaff();
++  fs = await createFactoryStaff();
+ });
+ 
+ const assignTo = (requestId: string, body: Record<string, unknown>, token = staff.managerToken) =>
+@@ -112,7 +114,7 @@ describe('transport steps', () => {
+     const unsealed = await post(r.driverToken, `${base}/dispatch`);
+     expect(unsealed.status).toBe(409);
+     expect(unsealed.body.error.code).toBe('SEAL_REQUIRED');
+-    await sealLoad(staff, r.collectionId);
++    const sealCode = await sealLoad(staff, r.collectionId);
+ 
+     const dispatched = await post(r.driverToken, `${base}/dispatch`);
+     expect(dispatched.status).toBe(200);
+@@ -120,6 +122,11 @@ describe('transport steps', () => {
+ 
+     expect((await post(r.driverToken, `${base}/handover`)).status).toBe(409); // must arrive first
+     expect((await post(r.driverToken, `${base}/arrive`)).status).toBe(200);
++    // No arrival slot and no gate clearance yet, so the hand-over is not allowed.
++    const early = await post(r.driverToken, `${base}/handover`);
++    expect(early.status).toBe(409);
++    expect(early.body.error.code).toBe('NOT_BOOKED');
++    await admitAtGate(staff, fs, r.collectionId, v.registrationNumber, sealCode);
+     const done = await post(r.driverToken, `${base}/handover`, { notes: 'Handed to gate supervisor' });
+     expect(done.status).toBe(200);
+     expect(done.body.data.status).toBe('HANDED_OVER');
+@@ -188,10 +195,11 @@ describe('transport steps', () => {
+     const base = `/collections/${r.collectionId}`;
+     await post(r.driverToken, `${base}/pickup`);
+     await post(r.driverToken, `${base}/load`, { collectedQuantityKg: '400' });
+-    await sealLoad(staff, r.collectionId);
++    const sealCode = await sealLoad(staff, r.collectionId);
+     await post(r.driverToken, `${base}/dispatch`);
+     await post(r.driverToken, `${base}/arrive`);
+-    await post(r.driverToken, `${base}/handover`);
++    await admitAtGate(staff, fs, r.collectionId, v.registrationNumber, sealCode);
++    expect((await post(r.driverToken, `${base}/handover`)).status).toBe(200);
+     const next = await passedRequest(staff);
+     expect((await assignTo(next.id, { transportOfficerId: r.driver.id, vehicleId: v.id })).status).toBe(201);
+   });
+diff --git a/apps/api/tests/integration/helpers.ts b/apps/api/tests/integration/helpers.ts
+index de11c4a..8f47c0e 100644
+--- a/apps/api/tests/integration/helpers.ts
++++ b/apps/api/tests/integration/helpers.ts
+@@ -256,6 +256,18 @@ export async function sealLoad(staff: Staff, collectionId: string): Promise<stri
+   return sealed.body.data.sealCode as string;
+ }
+ 
++/** The purchase manager books the arrival slot, then the security officer verifies the plate and seal and admits the vehicle. */
++export async function admitAtGate(staff: Staff, fs: FactoryStaff, collectionId: string, registrationNumber: string, sealCode: string) {
++  const slot = await makeSlot(staff);
++  const booked = await post(staff.managerToken, '/bookings', { collectionJobId: collectionId, slotId: slot.id });
++  expect(booked.status).toBe(201);
++  const path = `/bookings/${booked.body.data.id as string}`;
++  expect((await post(fs.securityToken, `${path}/arrive`)).status).toBe(200);
++  expect((await post(fs.securityToken, `${path}/verify`, { registrationNumber, sealCode })).status).toBe(200);
++  expect((await post(fs.securityToken, `${path}/admit`)).status).toBe(200);
++  return booked.body.data.shipment.id as string;
++}
++
+ /** The driver has collected the goods, the field officer sealed the load, and the vehicle was dispatched and arrived at the factory. */
+ export async function arrivedShipment(staff: Staff, opts: { slot?: Slot; collectedKg?: string } = {}) {
+   const b = await bookedShipment(staff, opts.slot ? { slot: opts.slot } : {});
+diff --git a/apps/api/tests/integration/seal.test.ts b/apps/api/tests/integration/seal.test.ts
+index cef1d71..8edfeac 100644
+--- a/apps/api/tests/integration/seal.test.ts
++++ b/apps/api/tests/integration/seal.test.ts
+@@ -106,3 +106,21 @@ describe('seal check at the gate', () => {
+     expect(locked.body.error.code).toBe('SEAL_LOCKED');
+   });
+ });
++
++describe('hand-over waits for the gate', () => {
++  it('the driver can only hand over after the security officer has verified and admitted the vehicle', async () => {
++    const a = await arrivedShipment(staff);
++    const handover = () => post(a.driverToken, `/collections/${a.collectionId}/handover`);
++    const refused = await handover();
++    expect(refused.status).toBe(409);
++    expect(refused.body.error.code).toBe('GATE_NOT_CLEARED');
++
++    const path = `/bookings/${a.bookingId}`;
++    await post(fs.securityToken, `${path}/arrive`);
++    expect((await handover()).status).toBe(409); // arrived at the gate, but not verified or admitted
++    await post(fs.securityToken, `${path}/verify`, { registrationNumber: a.vehicle.registrationNumber, sealCode: a.sealCode });
++    expect((await handover()).status).toBe(409); // verified, but not admitted
++    await post(fs.securityToken, `${path}/admit`);
++    expect((await handover()).status).toBe(200);
++  });
++});
+diff --git a/apps/web/src/pages/CollectionPages.tsx b/apps/web/src/pages/CollectionPages.tsx
+index 9acab0a..b97f13e 100644
+--- a/apps/web/src/pages/CollectionPages.tsx
++++ b/apps/web/src/pages/CollectionPages.tsx
+@@ -304,7 +304,14 @@ export function CollectionDetailPage() {
+             {next === 'load' && <LoadForm collection={c} />}
+             {next === 'dispatch' && (c.sealed ? <DispatchForm collection={c} /> : <Alert tone="info">Waiting for the field officer to photograph and seal the load. You can dispatch once it is sealed.</Alert>)}
+             {next === 'arrive' && <SimpleStep label="Mark arrived at factory" description="Confirm the vehicle has reached the factory gate." run={() => arrive.mutateAsync(undefined)} pending={arrive.isPending} />}
+-            {next === 'handover' && (
++            {next === 'handover' && c.shipment?.status !== 'ADMITTED' && (
++              <Alert tone="info">
++                {c.shipment?.booking
++                  ? 'Waiting for the security officer to verify and admit your vehicle at the gate. Handover opens once it is admitted.'
++                  : 'Waiting for the purchase manager to book your arrival slot. The security officer can only verify your vehicle once it is booked.'}
++              </Alert>
++            )}
++            {next === 'handover' && c.shipment?.status === 'ADMITTED' && (
+               <SimpleStep label="Record handover" description="Confirm the consignment has been handed over to factory staff. This completes your job." run={() => handover.mutateAsync(handoverNote.trim() ? { notes: handoverNote.trim() } : {})} pending={handover.isPending}>
+                 <TextAreaField label="Handover note (optional)" rows={2} value={handoverNote} onChange={(e) => setHandoverNote(e.target.value)} />
+               </SimpleStep>
+@@ -312,6 +319,13 @@ export function CollectionDetailPage() {
+           </Card>
+         )}
+ 
++        {user?.role === 'PURCHASE_MANAGER' && isCollectionActive(c.status) && !c.shipment?.booking && (
++          <Alert tone="warning">
++            No arrival slot is booked for this vehicle, so the security officer cannot see it at the gate and the driver cannot hand over.{' '}
++            <Link className="font-medium underline" to="/schedule">Book an arrival slot</Link>.
++          </Alert>
++        )}
++
+         <FieldEvidence collection={c} role={user?.role ?? ''} />
+ 
+         <Card>
+diff --git a/apps/web/src/test/fieldwork.test.tsx b/apps/web/src/test/fieldwork.test.tsx
+index 7067963..83dd39c 100644
+--- a/apps/web/src/test/fieldwork.test.tsx
++++ b/apps/web/src/test/fieldwork.test.tsx
+@@ -115,7 +115,7 @@ describe('collection screen', () => {
+       ['ASSIGNED', 'Confirm pickup'], ['LOADED', 'Dispatch to factory'], ['DISPATCHED', 'Mark arrived at factory'], ['ARRIVED', 'Record handover'],
+     ];
+     for (const [status, label] of cases) {
+-      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status, { sealed: true }) }) });
++      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status, { sealed: true, shipment: { id: 's1', code: 'SH-2026-000001', status: 'ADMITTED', booking: null } }) }) });
+       const { unmount } = page();
+       expect(await screen.findByRole('button', { name: label })).toBeInTheDocument();
+       expect(screen.getAllByRole('button').filter((b) => /Confirm pickup|Dispatch to factory|Mark arrived|Record handover|Record loading/.test(b.textContent ?? ''))).toHaveLength(1);
+@@ -148,6 +148,13 @@ describe('collection screen', () => {
+     expect(bodies(fn, '/load')[0]).toEqual({ collectedQuantityKg: '250' });
+   });
+ 
++  it('offers the handover only once the security officer has admitted the vehicle', async () => {
++    api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture('ARRIVED', { shipment: { id: 's1', code: 'SH-2026-000001', status: 'EXPECTED', booking: { id: 'b1', status: 'CHECKED_IN', startsAt: '2026-11-13T10:00:00Z', endsAt: '2026-11-13T11:00:00Z' } } }) }) });
++    page();
++    expect(await screen.findByText(/Waiting for the security officer to verify and admit/)).toBeInTheDocument();
++    expect(screen.queryByRole('button', { name: 'Record handover' })).not.toBeInTheDocument();
++  });
++
+   it('requires an expected arrival time to dispatch when none was set', async () => {
+     api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture('LOADED', { expectedArrivalAt: null, sealed: true }) }) });
+     page();
+-- 
+2.43.0
+

@@ -29,7 +29,7 @@ export async function addPhotos(actor: AuthUser, id: string, files: UploadedPhot
   const prepared = files.map((f) => {
     const mimeType = detectImageType(f.buffer);
     if (!mimeType) throw badRequest('INVALID_IMAGE', 'Only JPEG, PNG or WebP photos can be uploaded');
-    return { mimeType, sizeBytes: f.size, data: f.buffer };
+    return { mimeType, sizeBytes: f.size, data: new Uint8Array(f.buffer) };
   });
 
   await prisma.$transaction(async (tx) => {

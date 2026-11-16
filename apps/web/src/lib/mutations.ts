@@ -11,12 +11,13 @@ export function useAction<TInput, TOutput = unknown>(
   fn: (input: TInput) => Promise<TOutput>,
   keys: readonly string[],
   detailKey?: string,
+  idOf: (data: TOutput) => unknown = (data) => (data as { id?: unknown } | null | undefined)?.id,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: fn,
     onSuccess: (data) => {
-      const id = (data as { id?: unknown } | null | undefined)?.id;
+      const id = idOf(data);
       if (detailKey && typeof id === 'string') queryClient.setQueryData([detailKey, 'detail', id], data);
       for (const key of keys) {
         void queryClient.invalidateQueries({ queryKey: key === detailKey ? [key, 'list'] : [key] });

@@ -256,6 +256,18 @@ export async function sealLoad(staff: Staff, collectionId: string): Promise<stri
   return sealed.body.data.sealCode as string;
 }
 
+/** The purchase manager books the arrival slot, then the security officer verifies the plate and seal and admits the vehicle. */
+export async function admitAtGate(staff: Staff, fs: FactoryStaff, collectionId: string, registrationNumber: string, sealCode: string) {
+  const slot = await makeSlot(staff);
+  const booked = await post(staff.managerToken, '/bookings', { collectionJobId: collectionId, slotId: slot.id });
+  expect(booked.status).toBe(201);
+  const path = `/bookings/${booked.body.data.id as string}`;
+  expect((await post(fs.securityToken, `${path}/arrive`)).status).toBe(200);
+  expect((await post(fs.securityToken, `${path}/verify`, { registrationNumber, sealCode })).status).toBe(200);
+  expect((await post(fs.securityToken, `${path}/admit`)).status).toBe(200);
+  return booked.body.data.shipment.id as string;
+}
+
 /** The driver has collected the goods, the field officer sealed the load, and the vehicle was dispatched and arrived at the factory. */
 export async function arrivedShipment(staff: Staff, opts: { slot?: Slot; collectedKg?: string } = {}) {
   const b = await bookedShipment(staff, opts.slot ? { slot: opts.slot } : {});

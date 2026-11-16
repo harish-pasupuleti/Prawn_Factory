@@ -1,0 +1,2940 @@
+From 0d1297f400ae4defe81624ae99ead212929624b9 Mon Sep 17 00:00:00 2001
+From: claude <claude@example.com>
+Date: Thu, 12 Nov 2026 06:26:47 +0000
+Subject: [PATCH] Grading and packing with PM box plan and box numbers;
+ payments (Pay Now / Pay Later) with farmer invoices
+
+---
+ .../migration.sql                             |  80 +++++
+ apps/api/prisma/schema.prisma                 | 302 +++++++++++------
+ apps/api/src/app.ts                           |   4 +
+ apps/api/src/lib/ids.ts                       |  16 +
+ apps/api/src/modules/collections/evidence.ts  |   2 +-
+ apps/api/src/modules/packing/routes.ts        |  55 ++++
+ apps/api/src/modules/packing/rules.ts         |  41 +++
+ apps/api/src/modules/packing/schemas.ts       |  46 +++
+ apps/api/src/modules/packing/service.ts       | 304 ++++++++++++++++++
+ apps/api/src/modules/payments/routes.ts       |  33 ++
+ apps/api/src/modules/payments/rules.ts        |  26 ++
+ apps/api/src/modules/payments/schemas.ts      |  15 +
+ apps/api/src/modules/payments/service.ts      | 205 ++++++++++++
+ .../integration/packingAndPayments.test.ts    | 145 +++++++++
+ .../tests/unit/packingAndPaymentRules.test.ts |  52 +++
+ apps/web/src/App.tsx                          |   8 +
+ apps/web/src/components/BoxPlanCard.tsx       |  83 +++++
+ apps/web/src/components/Layout.tsx            |   8 +-
+ apps/web/src/components/PaymentParts.tsx      |  37 +++
+ apps/web/src/features/packing/hooks.ts        |  41 +++
+ apps/web/src/features/payments/hooks.ts       |  29 ++
+ apps/web/src/lib/api.ts                       |   2 +-
+ apps/web/src/lib/mutations.ts                 |   3 +-
+ apps/web/src/lib/types.ts                     |  41 +++
+ apps/web/src/pages/DashboardPage.tsx          |  33 ++
+ apps/web/src/pages/PackingPages.tsx           | 192 +++++++++++
+ apps/web/src/pages/PaymentPages.tsx           | 155 +++++++++
+ apps/web/src/pages/RequestDetailPage.tsx      |  26 ++
+ apps/web/src/test/auth.test.tsx               |  10 +-
+ apps/web/src/test/fieldwork.test.tsx          |   4 +-
+ docs/API.md                                   |  31 +-
+ package-lock.json                             |  42 ++-
+ 32 files changed, 1947 insertions(+), 124 deletions(-)
+ create mode 100644 apps/api/prisma/migrations/20260601000000_packing_and_payments/migration.sql
+ create mode 100644 apps/api/src/modules/packing/routes.ts
+ create mode 100644 apps/api/src/modules/packing/rules.ts
+ create mode 100644 apps/api/src/modules/packing/schemas.ts
+ create mode 100644 apps/api/src/modules/packing/service.ts
+ create mode 100644 apps/api/src/modules/payments/routes.ts
+ create mode 100644 apps/api/src/modules/payments/rules.ts
+ create mode 100644 apps/api/src/modules/payments/schemas.ts
+ create mode 100644 apps/api/src/modules/payments/service.ts
+ create mode 100644 apps/api/tests/integration/packingAndPayments.test.ts
+ create mode 100644 apps/api/tests/unit/packingAndPaymentRules.test.ts
+ create mode 100644 apps/web/src/components/BoxPlanCard.tsx
+ create mode 100644 apps/web/src/components/PaymentParts.tsx
+ create mode 100644 apps/web/src/features/packing/hooks.ts
+ create mode 100644 apps/web/src/features/payments/hooks.ts
+ create mode 100644 apps/web/src/pages/PackingPages.tsx
+ create mode 100644 apps/web/src/pages/PaymentPages.tsx
+
+diff --git a/apps/api/prisma/migrations/20260601000000_packing_and_payments/migration.sql b/apps/api/prisma/migrations/20260601000000_packing_and_payments/migration.sql
+new file mode 100644
+index 0000000..032927b
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260601000000_packing_and_payments/migration.sql
+@@ -0,0 +1,80 @@
++-- Numbers for boxes and invoices.
++CREATE SEQUENCE box_number_seq START 1;
++CREATE SEQUENCE invoice_number_seq START 1;
++
++CREATE TYPE "BoxForm" AS ENUM ('HEAD_ON', 'HEADLESS');
++CREATE TYPE "BoxStatus" AS ENUM ('PACKED', 'VOID');
++CREATE TYPE "PaymentOption" AS ENUM ('PAY_NOW', 'PAY_LATER');
++CREATE TYPE "PaymentStatus" AS ENUM ('PAY_LATER', 'PAID');
++
++ALTER TABLE "Shipment" ADD COLUMN "packingApprovedAt" TIMESTAMP(3), ADD COLUMN "packingNote" TEXT;
++
++CREATE TABLE "BoxRequirement" (
++  "id" UUID NOT NULL,
++  "requestId" UUID NOT NULL,
++  "form" "BoxForm" NOT NULL,
++  "sizeGrade" TEXT NOT NULL,
++  "boxWeightKg" DECIMAL(8,3) NOT NULL,
++  "quantity" INTEGER NOT NULL,
++  "createdById" UUID NOT NULL,
++  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++  CONSTRAINT "BoxRequirement_pkey" PRIMARY KEY ("id"),
++  CONSTRAINT "BoxRequirement_quantity_positive" CHECK ("quantity" > 0),
++  CONSTRAINT "BoxRequirement_weight_positive" CHECK ("boxWeightKg" > 0)
++);
++CREATE UNIQUE INDEX "BoxRequirement_requestId_form_sizeGrade_boxWeightKg_key" ON "BoxRequirement"("requestId", "form", "sizeGrade", "boxWeightKg");
++CREATE INDEX "BoxRequirement_requestId_idx" ON "BoxRequirement"("requestId");
++
++CREATE TABLE "PackedBox" (
++  "id" UUID NOT NULL,
++  "shipmentId" UUID NOT NULL,
++  "requirementId" UUID NOT NULL,
++  "form" "BoxForm" NOT NULL,
++  "sizeGrade" TEXT NOT NULL,
++  "netWeightKg" DECIMAL(8,3) NOT NULL,
++  "status" "BoxStatus" NOT NULL DEFAULT 'PACKED',
++  "boxNumber" TEXT,
++  "numberedAt" TIMESTAMP(3),
++  "voidReason" TEXT,
++  "voidedAt" TIMESTAMP(3),
++  "packedById" UUID NOT NULL,
++  "packedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++  CONSTRAINT "PackedBox_pkey" PRIMARY KEY ("id"),
++  CONSTRAINT "PackedBox_weight_positive" CHECK ("netWeightKg" > 0)
++);
++CREATE UNIQUE INDEX "PackedBox_boxNumber_key" ON "PackedBox"("boxNumber");
++CREATE INDEX "PackedBox_shipmentId_status_idx" ON "PackedBox"("shipmentId", "status");
++CREATE INDEX "PackedBox_requirementId_idx" ON "PackedBox"("requirementId");
++
++CREATE TABLE "Payment" (
++  "id" UUID NOT NULL,
++  "shipmentId" UUID NOT NULL,
++  "requestId" UUID NOT NULL,
++  "option" "PaymentOption" NOT NULL,
++  "status" "PaymentStatus" NOT NULL,
++  "decidedById" UUID NOT NULL,
++  "decidedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++  "invoiceNumber" TEXT,
++  "invoicedAt" TIMESTAMP(3),
++  "quantityKg" DECIMAL(12,3),
++  "quantityBasis" TEXT,
++  "ratePerKg" DECIMAL(12,2),
++  "amountInr" DECIMAL(14,2),
++  "method" TEXT,
++  "reference" TEXT,
++  "paidAt" TIMESTAMP(3),
++  CONSTRAINT "Payment_pkey" PRIMARY KEY ("id")
++);
++CREATE UNIQUE INDEX "Payment_shipmentId_key" ON "Payment"("shipmentId");
++CREATE UNIQUE INDEX "Payment_invoiceNumber_key" ON "Payment"("invoiceNumber");
++CREATE INDEX "Payment_requestId_idx" ON "Payment"("requestId");
++CREATE INDEX "Payment_status_idx" ON "Payment"("status");
++
++ALTER TABLE "BoxRequirement" ADD CONSTRAINT "BoxRequirement_requestId_fkey" FOREIGN KEY ("requestId") REFERENCES "ProcurementRequest"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "BoxRequirement" ADD CONSTRAINT "BoxRequirement_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "PackedBox" ADD CONSTRAINT "PackedBox_shipmentId_fkey" FOREIGN KEY ("shipmentId") REFERENCES "Shipment"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "PackedBox" ADD CONSTRAINT "PackedBox_requirementId_fkey" FOREIGN KEY ("requirementId") REFERENCES "BoxRequirement"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "PackedBox" ADD CONSTRAINT "PackedBox_packedById_fkey" FOREIGN KEY ("packedById") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "Payment" ADD CONSTRAINT "Payment_shipmentId_fkey" FOREIGN KEY ("shipmentId") REFERENCES "Shipment"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "Payment" ADD CONSTRAINT "Payment_requestId_fkey" FOREIGN KEY ("requestId") REFERENCES "ProcurementRequest"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "Payment" ADD CONSTRAINT "Payment_decidedById_fkey" FOREIGN KEY ("decidedById") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 32358d0..1302d85 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -126,6 +126,29 @@ enum ExceptionEventType {
+   RESOLVED
+ }
+ 
++/**
++ * How the prawns are processed: with the head on, or headless.
++ */
++enum BoxForm {
++  HEAD_ON
++  HEADLESS
++}
++
++enum BoxStatus {
++  PACKED
++  VOID
++}
++
++enum PaymentOption {
++  PAY_NOW
++  PAY_LATER
++}
++
++enum PaymentStatus {
++  PAY_LATER
++  PAID
++}
++
+ enum QueueStatus {
+   QUEUED
+   IN_PROGRESS
+@@ -133,42 +156,45 @@ enum QueueStatus {
+ }
+ 
+ model User {
+-  id               String    @id @default(uuid()) @db.Uuid
+-  email            String    @unique
++  id               String     @id @default(uuid()) @db.Uuid
++  email            String     @unique
+   passwordHash     String
+   fullName         String
+   role             Role
+   status           UserStatus @default(ACTIVE)
+-  failedLoginCount Int       @default(0)
++  failedLoginCount Int        @default(0)
+   lockedUntil      DateTime?
+-  createdAt        DateTime  @default(now())
+-  updatedAt        DateTime  @updatedAt
++  createdAt        DateTime   @default(now())
++  updatedAt        DateTime   @updatedAt
+ 
+-  farmerProfile    FarmerProfile?
+-  sessions         RefreshSession[]
+-  statusChanges    ProcurementRequest[]   @relation("RequestStatusChangedBy")
+-  amendments       ProcurementAmendment[]
+-  auditEvents      AuditEvent[]
++  farmerProfile FarmerProfile?
++  sessions      RefreshSession[]
++  statusChanges ProcurementRequest[]   @relation("RequestStatusChangedBy")
++  amendments    ProcurementAmendment[]
++  auditEvents   AuditEvent[]
+ 
+-  inspectionsAssigned  FieldInspection[]      @relation("InspectionOfficer")
+-  inspectionsCreated   FieldInspection[]      @relation("InspectionAssigner")
++  inspectionsAssigned  FieldInspection[]    @relation("InspectionOfficer")
++  inspectionsCreated   FieldInspection[]    @relation("InspectionAssigner")
+   inspectionDecisions  InspectionDecision[]
+-  collectionsAsOfficer CollectionJob[]        @relation("CollectionOfficer")
+-  collectionsCreated   CollectionJob[]        @relation("CollectionAssigner")
++  collectionsAsOfficer CollectionJob[]      @relation("CollectionOfficer")
++  collectionsCreated   CollectionJob[]      @relation("CollectionAssigner")
+   incidentsReported    CollectionIncident[]
+-  collectionsSealed    CollectionJob[]        @relation("CollectionSealer")
++  collectionsSealed    CollectionJob[]      @relation("CollectionSealer")
+   photosUploaded       CollectionPhoto[]
++  boxRequirementsSet   BoxRequirement[]
++  boxesPacked          PackedBox[]
++  paymentsDecided      Payment[]
+   slotsCreated         FactorySlot[]
+   bookingsReserved     SlotBooking[]
+   gateEvents           GateEvent[]
+   weightsRecorded      WeightMeasurement[]
+-  shipmentsReceived    Shipment[]            @relation("ShipmentReceiver")
+-  exceptionsRaised     ExceptionCase[]       @relation("ExceptionRaiser")
+-  exceptionsResolved   ExceptionCase[]       @relation("ExceptionResolver")
++  shipmentsReceived    Shipment[]           @relation("ShipmentReceiver")
++  exceptionsRaised     ExceptionCase[]      @relation("ExceptionRaiser")
++  exceptionsResolved   ExceptionCase[]      @relation("ExceptionResolver")
+   exceptionEvents      ExceptionEvent[]
+-  queueReleased        QueueEntry[]          @relation("QueueReleaser")
+-  queueStarted         QueueEntry[]          @relation("QueueStarter")
+-  queueCompleted       QueueEntry[]          @relation("QueueCompleter")
++  queueReleased        QueueEntry[]         @relation("QueueReleaser")
++  queueStarted         QueueEntry[]         @relation("QueueStarter")
++  queueCompleted       QueueEntry[]         @relation("QueueCompleter")
+ 
+   @@index([role, status])
+ }
+@@ -183,8 +209,8 @@ model FarmerProfile {
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+ 
+-  user      User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+-  requests  ProcurementRequest[]
++  user     User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
++  requests ProcurementRequest[]
+ }
+ 
+ model RefreshSession {
+@@ -195,7 +221,7 @@ model RefreshSession {
+   revokedAt DateTime?
+   createdAt DateTime  @default(now())
+ 
+-  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
++  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+ 
+   @@index([userId])
+ }
+@@ -219,14 +245,16 @@ model ProcurementRequest {
+   createdAt             DateTime          @default(now())
+   updatedAt             DateTime          @updatedAt
+ 
+-  farmer          FarmerProfile          @relation(fields: [farmerId], references: [id], onDelete: Restrict)
+-  statusChangedBy User?                  @relation("RequestStatusChangedBy", fields: [statusChangedById], references: [id], onDelete: Restrict)
+-  amendments      ProcurementAmendment[]
++  farmer              FarmerProfile          @relation(fields: [farmerId], references: [id], onDelete: Restrict)
++  statusChangedBy     User?                  @relation("RequestStatusChangedBy", fields: [statusChangedById], references: [id], onDelete: Restrict)
++  amendments          ProcurementAmendment[]
+   inspections         FieldInspection[]
+   inspectionDecisions InspectionDecision[]
+   collections         CollectionJob[]
+   shipments           Shipment[]
+   exceptions          ExceptionCase[]
++  boxRequirements     BoxRequirement[]
++  payments            Payment[]
+ 
+   @@index([farmerId, createdAt])
+   @@index([status, createdAt])
+@@ -243,8 +271,8 @@ model ProcurementAmendment {
+   actorId   String   @db.Uuid
+   createdAt DateTime @default(now())
+ 
+-  request   ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+-  actor     User               @relation(fields: [actorId], references: [id], onDelete: Restrict)
++  request ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  actor   User               @relation(fields: [actorId], references: [id], onDelete: Restrict)
+ 
+   @@index([requestId, seq])
+ }
+@@ -261,7 +289,7 @@ model AuditEvent {
+   ip         String?
+   createdAt  DateTime @default(now())
+ 
+-  actor      User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
++  actor User? @relation(fields: [actorId], references: [id], onDelete: Restrict)
+ 
+   @@index([entityType, entityId])
+   @@index([actorId])
+@@ -277,36 +305,36 @@ model Vehicle {
+   createdAt          DateTime @default(now())
+   updatedAt          DateTime @updatedAt
+ 
+-  collections        CollectionJob[]
++  collections CollectionJob[]
+ }
+ 
+ // One row per inspection attempt. inspectedQuantityKg is separate from the farmer's declared quantity
+ // and from the collected quantity; none of the three is ever overwritten by another.
+ model FieldInspection {
+-  id                             String            @id @default(uuid()) @db.Uuid
+-  requestId                      String            @db.Uuid
+-  officerId                      String            @db.Uuid
+-  assignedById                   String            @db.Uuid
+-  status                         InspectionStatus  @default(ASSIGNED)
+-  assignedAt                     DateTime          @default(now())
++  id                             String             @id @default(uuid()) @db.Uuid
++  requestId                      String             @db.Uuid
++  officerId                      String             @db.Uuid
++  assignedById                   String             @db.Uuid
++  status                         InspectionStatus   @default(ASSIGNED)
++  assignedAt                     DateTime           @default(now())
+   startedAt                      DateTime?
+   completedAt                    DateTime?
+   outcome                        InspectionOutcome?
+   observedSpecies                String?
+   observedSizeCount              String?
+-  inspectedQuantityKg            Decimal?          @db.Decimal(12, 3)
+-  declaredQuantityKgAtInspection Decimal?          @db.Decimal(12, 3)
+-  quantityVariancePct            Decimal?          @db.Decimal(12, 2)
++  inspectedQuantityKg            Decimal?           @db.Decimal(12, 3)
++  declaredQuantityKgAtInspection Decimal?           @db.Decimal(12, 3)
++  quantityVariancePct            Decimal?           @db.Decimal(12, 2)
+   qualityNotes                   String?
+   discrepancyNotes               String?
+   cancelReason                   String?
+-  createdAt                      DateTime          @default(now())
+-  updatedAt                      DateTime          @updatedAt
++  createdAt                      DateTime           @default(now())
++  updatedAt                      DateTime           @updatedAt
+ 
+-  request     ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+-  officer     User               @relation("InspectionOfficer", fields: [officerId], references: [id], onDelete: Restrict)
+-  assignedBy  User               @relation("InspectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
+-  decision    InspectionDecision?
++  request    ProcurementRequest  @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  officer    User                @relation("InspectionOfficer", fields: [officerId], references: [id], onDelete: Restrict)
++  assignedBy User                @relation("InspectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
++  decision   InspectionDecision?
+ 
+   @@index([requestId, createdAt])
+   @@index([officerId, status])
+@@ -323,9 +351,9 @@ model InspectionDecision {
+   decidedById  String                 @db.Uuid
+   createdAt    DateTime               @default(now())
+ 
+-  request      ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+-  inspection   FieldInspection    @relation(fields: [inspectionId], references: [id], onDelete: Restrict)
+-  decidedBy    User               @relation(fields: [decidedById], references: [id], onDelete: Restrict)
++  request    ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  inspection FieldInspection    @relation(fields: [inspectionId], references: [id], onDelete: Restrict)
++  decidedBy  User               @relation(fields: [decidedById], references: [id], onDelete: Restrict)
+ 
+   @@index([requestId])
+ }
+@@ -351,22 +379,22 @@ model CollectionJob {
+   cancelReason        String?
+   // Seal applied by the field officer after loading. The code is never shown to the transport or security officer;
+   // the security officer must type it at the gate and the server compares it.
+-  sealCode           String?          @unique
+-  sealedAt           DateTime?
+-  sealedById         String?          @db.Uuid
+-  sealFailedAttempts Int              @default(0)
+-  sealLastFailedAt   DateTime?
++  sealCode            String?          @unique
++  sealedAt            DateTime?
++  sealedById          String?          @db.Uuid
++  sealFailedAttempts  Int              @default(0)
++  sealLastFailedAt    DateTime?
+   createdAt           DateTime         @default(now())
+   updatedAt           DateTime         @updatedAt
+ 
+-  request           ProcurementRequest   @relation(fields: [requestId], references: [id], onDelete: Restrict)
+-  transportOfficer  User                 @relation("CollectionOfficer", fields: [transportOfficerId], references: [id], onDelete: Restrict)
+-  assignedBy        User                 @relation("CollectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
+-  vehicle           Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+-  sealedBy          User?                @relation("CollectionSealer", fields: [sealedById], references: [id], onDelete: Restrict)
+-  incidents         CollectionIncident[]
+-  photos            CollectionPhoto[]
+-  shipment          Shipment?
++  request          ProcurementRequest   @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  transportOfficer User                 @relation("CollectionOfficer", fields: [transportOfficerId], references: [id], onDelete: Restrict)
++  assignedBy       User                 @relation("CollectionAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
++  vehicle          Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
++  sealedBy         User?                @relation("CollectionSealer", fields: [sealedById], references: [id], onDelete: Restrict)
++  incidents        CollectionIncident[]
++  photos           CollectionPhoto[]
++  shipment         Shipment?
+ 
+   @@index([requestId, createdAt])
+   @@index([transportOfficerId, status])
+@@ -384,8 +412,8 @@ model CollectionIncident {
+   quantityAffectedKg Decimal?     @db.Decimal(12, 3)
+   createdAt          DateTime     @default(now())
+ 
+-  collectionJob      CollectionJob @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
+-  reporter           User          @relation(fields: [reporterId], references: [id], onDelete: Restrict)
++  collectionJob CollectionJob @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
++  reporter      User          @relation(fields: [reporterId], references: [id], onDelete: Restrict)
+ 
+   @@index([collectionJobId, createdAt])
+ }
+@@ -400,8 +428,8 @@ model FactorySlot {
+   createdAt   DateTime @default(now())
+   updatedAt   DateTime @updatedAt
+ 
+-  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
+-  bookings    SlotBooking[]
++  createdBy User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
++  bookings  SlotBooking[]
+ 
+   @@unique([startsAt, endsAt])
+   @@index([startsAt])
+@@ -420,37 +448,42 @@ model Shipment {
+   receivedAt         DateTime?
+   receivedById       String?        @db.Uuid
+   releasedAt         DateTime?
++  // The purchase manager signs off the packing once every box on the purchase order is packed and numbered.
++  packingApprovedAt  DateTime?
++  packingNote        String?
+   createdAt          DateTime       @default(now())
+   updatedAt          DateTime       @updatedAt
+ 
+-  request       ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+-  collectionJob CollectionJob      @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
+-  receivedBy    User?              @relation("ShipmentReceiver", fields: [receivedById], references: [id], onDelete: Restrict)
++  request       ProcurementRequest  @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  collectionJob CollectionJob       @relation(fields: [collectionJobId], references: [id], onDelete: Restrict)
++  receivedBy    User?               @relation("ShipmentReceiver", fields: [receivedById], references: [id], onDelete: Restrict)
+   bookings      SlotBooking[]
+   gateEvents    GateEvent[]
+   weights       WeightMeasurement[]
+   exceptions    ExceptionCase[]
+   queueEntry    QueueEntry?
++  boxes         PackedBox[]
++  payment       Payment?
+ 
+   @@index([requestId])
+   @@index([status])
+ }
+ 
+ model SlotBooking {
+-  id                 String        @id @default(uuid()) @db.Uuid
+-  shipmentId         String        @db.Uuid
+-  slotId             String        @db.Uuid
+-  status             BookingStatus @default(RESERVED)
+-  reservedById       String        @db.Uuid
+-  reason             String?
+-  rescheduledFromId  String?       @db.Uuid
+-  createdAt          DateTime      @default(now())
+-  updatedAt          DateTime      @updatedAt
+-
+-  shipment    Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+-  slot        FactorySlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
+-  reservedBy  User        @relation(fields: [reservedById], references: [id], onDelete: Restrict)
+-  gateEvents  GateEvent[]
++  id                String        @id @default(uuid()) @db.Uuid
++  shipmentId        String        @db.Uuid
++  slotId            String        @db.Uuid
++  status            BookingStatus @default(RESERVED)
++  reservedById      String        @db.Uuid
++  reason            String?
++  rescheduledFromId String?       @db.Uuid
++  createdAt         DateTime      @default(now())
++  updatedAt         DateTime      @updatedAt
++
++  shipment   Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
++  slot       FactorySlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
++  reservedBy User        @relation(fields: [reservedById], references: [id], onDelete: Restrict)
++  gateEvents GateEvent[]
+ 
+   @@index([slotId, status])
+   @@index([shipmentId, createdAt])
+@@ -466,9 +499,9 @@ model GateEvent {
+   reason     String?
+   createdAt  DateTime      @default(now())
+ 
+-  shipment   Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+-  booking    SlotBooking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+-  actor      User        @relation(fields: [actorId], references: [id], onDelete: Restrict)
++  shipment Shipment    @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
++  booking  SlotBooking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
++  actor    User        @relation(fields: [actorId], references: [id], onDelete: Restrict)
+ 
+   @@index([shipmentId, createdAt])
+   @@index([bookingId])
+@@ -509,11 +542,11 @@ model ExceptionCase {
+   createdAt    DateTime        @default(now())
+   updatedAt    DateTime        @updatedAt
+ 
+-  shipment     Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+-  request      ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+-  raisedBy     User               @relation("ExceptionRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+-  resolvedBy   User?              @relation("ExceptionResolver", fields: [resolvedById], references: [id], onDelete: Restrict)
+-  events       ExceptionEvent[]
++  shipment   Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
++  request    ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  raisedBy   User               @relation("ExceptionRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
++  resolvedBy User?              @relation("ExceptionResolver", fields: [resolvedById], references: [id], onDelete: Restrict)
++  events     ExceptionEvent[]
+ 
+   @@index([status, createdAt])
+   @@index([shipmentId])
+@@ -528,8 +561,8 @@ model ExceptionEvent {
+   note        String
+   createdAt   DateTime           @default(now())
+ 
+-  exception   ExceptionCase @relation(fields: [exceptionId], references: [id], onDelete: Restrict)
+-  actor       User          @relation(fields: [actorId], references: [id], onDelete: Restrict)
++  exception ExceptionCase @relation(fields: [exceptionId], references: [id], onDelete: Restrict)
++  actor     User          @relation(fields: [actorId], references: [id], onDelete: Restrict)
+ 
+   @@index([exceptionId, createdAt])
+ }
+@@ -541,7 +574,7 @@ model ProcessingStation {
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+ 
+-  entries   QueueEntry[]
++  entries QueueEntry[]
+ }
+ 
+ // Timers are NOT stored. They are computed from startedAt and targetDurationMin using server time,
+@@ -570,7 +603,9 @@ model QueueEntry {
+   @@index([status, createdAt])
+ }
+ 
+-/** Photos taken at the farm by the field officer. Append-only; stored in the database so no extra storage service is needed. */
++/**
++ * Photos taken at the farm by the field officer. Append-only; stored in the database so no extra storage service is needed.
++ */
+ model CollectionPhoto {
+   id              String   @id @default(uuid()) @db.Uuid
+   collectionJobId String   @db.Uuid
+@@ -586,3 +621,80 @@ model CollectionPhoto {
+ 
+   @@index([collectionJobId, createdAt])
+ }
++
++/**
++ * What the purchase manager requires from packing: this many boxes of this weight, of this form and size grade.
++ */
++model BoxRequirement {
++  id          String   @id @default(uuid()) @db.Uuid
++  requestId   String   @db.Uuid
++  form        BoxForm
++  sizeGrade   String
++  boxWeightKg Decimal  @db.Decimal(8, 3)
++  quantity    Int
++  createdById String   @db.Uuid
++  createdAt   DateTime @default(now())
++
++  request   ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  createdBy User               @relation(fields: [createdById], references: [id], onDelete: Restrict)
++  boxes     PackedBox[]
++
++  @@unique([requestId, form, sizeGrade, boxWeightKg])
++  @@index([requestId])
++}
++
++/**
++ * One packed box. The purchase manager gives it its unique box number after packing.
++ */
++model PackedBox {
++  id            String    @id @default(uuid()) @db.Uuid
++  shipmentId    String    @db.Uuid
++  requirementId String    @db.Uuid
++  form          BoxForm
++  sizeGrade     String
++  netWeightKg   Decimal   @db.Decimal(8, 3)
++  status        BoxStatus @default(PACKED)
++  boxNumber     String?   @unique
++  numberedAt    DateTime?
++  voidReason    String?
++  voidedAt      DateTime?
++  packedById    String    @db.Uuid
++  packedAt      DateTime  @default(now())
++
++  shipment    Shipment       @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
++  requirement BoxRequirement @relation(fields: [requirementId], references: [id], onDelete: Restrict)
++  packedBy    User           @relation(fields: [packedById], references: [id], onDelete: Restrict)
++
++  @@index([shipmentId, status])
++  @@index([requirementId])
++}
++
++/**
++ * The purchase manager's payment decision for a delivered shipment, and the invoice once it is paid.
++ */
++model Payment {
++  id            String        @id @default(uuid()) @db.Uuid
++  shipmentId    String        @unique @db.Uuid
++  requestId     String        @db.Uuid
++  option        PaymentOption
++  status        PaymentStatus
++  decidedById   String        @db.Uuid
++  decidedAt     DateTime      @default(now())
++  // Filled when the payment is made (immediately for Pay Now, after processing for Pay Later).
++  invoiceNumber String?       @unique
++  invoicedAt    DateTime?
++  quantityKg    Decimal?      @db.Decimal(12, 3)
++  quantityBasis String?
++  ratePerKg     Decimal?      @db.Decimal(12, 2)
++  amountInr     Decimal?      @db.Decimal(14, 2)
++  method        String?
++  reference     String?
++  paidAt        DateTime?
++
++  shipment  Shipment           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
++  request   ProcurementRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
++  decidedBy User               @relation(fields: [decidedById], references: [id], onDelete: Restrict)
++
++  @@index([requestId])
++  @@index([status])
++}
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 89e62ac..426ae84 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -14,6 +14,8 @@ import { authRouter, type AuthRouterOptions } from './modules/auth/routes';
+ import { collectionsRouter } from './modules/collections/routes';
+ import { bookingsRouter, exceptionsRouter, queueRouter, shipmentsRouter, slotsRouter, stationsRouter } from './modules/factory/routes';
+ import { inspectionsRouter } from './modules/inspections/routes';
++import { packingRouter } from './modules/packing/routes';
++import { paymentsRouter } from './modules/payments/routes';
+ import { procurementRouter } from './modules/procurement/routes';
+ import { usersRouter } from './modules/users/routes';
+ import { vehiclesRouter } from './modules/vehicles/routes';
+@@ -56,6 +58,8 @@ export function createApp(options: AuthRouterOptions = {}): Express {
+   v1.use('/shipments', shipmentsRouter());
+   v1.use('/exceptions', exceptionsRouter());
+   v1.use('/stations', stationsRouter());
++  v1.use('/packing', packingRouter());
++  v1.use('/payments', paymentsRouter());
+   v1.use('/queue', queueRouter());
+   app.use('/api/v1', v1);
+ 
+diff --git a/apps/api/src/lib/ids.ts b/apps/api/src/lib/ids.ts
+index 8248c82..d90e95a 100644
+--- a/apps/api/src/lib/ids.ts
++++ b/apps/api/src/lib/ids.ts
+@@ -15,3 +15,19 @@ export async function nextShipmentCode(tx: Tx, now = new Date()): Promise<string
+   if (n === undefined) throw new Error('Could not allocate shipment code');
+   return `SH-${now.getUTCFullYear()}-${String(n).padStart(6, '0')}`;
+ }
++
++/** Generates BOX-<year>-<6 digit number>. Unique across all boxes; numbers are never reused. */
++export async function nextBoxNumber(tx: Tx, now = new Date()): Promise<string> {
++  const rows = await tx.$queryRaw<{ n: bigint }[]>`SELECT nextval('box_number_seq') AS n`;
++  const n = rows[0]?.n;
++  if (n === undefined) throw new Error('Could not allocate box number');
++  return `BOX-${now.getUTCFullYear()}-${String(n).padStart(6, '0')}`;
++}
++
++/** Generates INV-<year>-<6 digit number> for farmer invoices. */
++export async function nextInvoiceNumber(tx: Tx, now = new Date()): Promise<string> {
++  const rows = await tx.$queryRaw<{ n: bigint }[]>`SELECT nextval('invoice_number_seq') AS n`;
++  const n = rows[0]?.n;
++  if (n === undefined) throw new Error('Could not allocate invoice number');
++  return `INV-${now.getUTCFullYear()}-${String(n).padStart(6, '0')}`;
++}
+diff --git a/apps/api/src/modules/collections/evidence.ts b/apps/api/src/modules/collections/evidence.ts
+index 4b1ca50..1155477 100644
+--- a/apps/api/src/modules/collections/evidence.ts
++++ b/apps/api/src/modules/collections/evidence.ts
+@@ -29,7 +29,7 @@ export async function addPhotos(actor: AuthUser, id: string, files: UploadedPhot
+   const prepared = files.map((f) => {
+     const mimeType = detectImageType(f.buffer);
+     if (!mimeType) throw badRequest('INVALID_IMAGE', 'Only JPEG, PNG or WebP photos can be uploaded');
+-    return { mimeType, sizeBytes: f.size, data: f.buffer };
++    return { mimeType, sizeBytes: f.size, data: new Uint8Array(f.buffer) };
+   });
+ 
+   await prisma.$transaction(async (tx) => {
+diff --git a/apps/api/src/modules/packing/routes.ts b/apps/api/src/modules/packing/routes.ts
+new file mode 100644
+index 0000000..0b513c1
+--- /dev/null
++++ b/apps/api/src/modules/packing/routes.ts
+@@ -0,0 +1,55 @@
++import { Router } from 'express';
++import { z } from 'zod';
++import { authenticate, requireRole } from '../../middleware/auth';
++import { addBoxesSchema, approvePackingSchema, assignIdsSchema, boxPlanSchema, listPackingQuerySchema, voidBoxSchema } from './schemas';
++import * as service from './service';
++
++const shipmentParam = z.object({ shipmentId: z.string().uuid() });
++const boxParam = z.object({ shipmentId: z.string().uuid(), boxId: z.string().uuid() });
++const requestParam = z.object({ requestId: z.string().uuid() });
++
++const VIEWERS = ['FACTORY_OPERATOR', 'PURCHASE_MANAGER', 'ADMIN'] as const;
++
++export function packingRouter(): Router {
++  const router = Router();
++  router.use(authenticate);
++
++  // Box requirements of a purchase order. The purchase manager sets them; the factory reads them while packing.
++  router.get('/plans/:requestId', requireRole(...VIEWERS), async (req, res) => {
++    const { requestId } = requestParam.parse(req.params);
++    res.json({ data: await service.getBoxPlan(requestId) });
++  });
++  router.put('/plans/:requestId', requireRole('PURCHASE_MANAGER'), async (req, res) => {
++    const { requestId } = requestParam.parse(req.params);
++    res.json({ data: await service.setBoxPlan(req.user!, requestId, boxPlanSchema.parse(req.body), req.ip) });
++  });
++
++  router.get('/', requireRole(...VIEWERS), async (req, res) => {
++    const { items, meta } = await service.listPacking(listPackingQuerySchema.parse(req.query));
++    res.json({ data: items, meta });
++  });
++  router.get('/:shipmentId', requireRole(...VIEWERS), async (req, res) => {
++    const { shipmentId } = shipmentParam.parse(req.params);
++    res.json({ data: await service.getPacking(shipmentId) });
++  });
++
++  router.post('/:shipmentId/boxes', requireRole('FACTORY_OPERATOR'), async (req, res) => {
++    const { shipmentId } = shipmentParam.parse(req.params);
++    res.status(201).json({ data: await service.addBoxes(req.user!, shipmentId, addBoxesSchema.parse(req.body), req.ip) });
++  });
++  router.post('/:shipmentId/assign-ids', requireRole('PURCHASE_MANAGER'), async (req, res) => {
++    const { shipmentId } = shipmentParam.parse(req.params);
++    const { boxIds } = assignIdsSchema.parse(req.body ?? {});
++    res.json({ data: await service.assignBoxIds(req.user!, shipmentId, boxIds, req.ip) });
++  });
++  router.post('/:shipmentId/boxes/:boxId/void', requireRole('PURCHASE_MANAGER'), async (req, res) => {
++    const { shipmentId, boxId } = boxParam.parse(req.params);
++    res.json({ data: await service.voidBox(req.user!, shipmentId, boxId, voidBoxSchema.parse(req.body).reason, req.ip) });
++  });
++  router.post('/:shipmentId/approve', requireRole('PURCHASE_MANAGER'), async (req, res) => {
++    const { shipmentId } = shipmentParam.parse(req.params);
++    res.json({ data: await service.approvePacking(req.user!, shipmentId, approvePackingSchema.parse(req.body ?? {}).note, req.ip) });
++  });
++
++  return router;
++}
+diff --git a/apps/api/src/modules/packing/rules.ts b/apps/api/src/modules/packing/rules.ts
+new file mode 100644
+index 0000000..169123c
+--- /dev/null
++++ b/apps/api/src/modules/packing/rules.ts
+@@ -0,0 +1,41 @@
++/** Pure packing rules (no database access) so they are easy to test. */
++import { toGrams } from '../../lib/quantity';
++
++export const BOX_FORMS = ['HEAD_ON', 'HEADLESS'] as const;
++export type BoxFormName = (typeof BOX_FORMS)[number];
++export const BOX_FORM_LABELS: Record<BoxFormName, string> = { HEAD_ON: 'Head-on', HEADLESS: 'Headless' };
++
++/** Size grades: prawns per kilogram, as sold in the trade. */
++export const SIZE_GRADES = ['10-20', '20-30', '30-40', '40-50', '50-60', '60-70', '70-80', '80-100'] as const;
++
++/** A packed box may differ from the required box weight by this much. */
++export const BOX_WEIGHT_TOLERANCE_PCT = 2;
++export const MAX_BOXES_PER_ENTRY = 50;
++export const MAX_REQUIREMENT_LINES = 40;
++
++/** Boxes can be recorded while the shipment is being processed, and until the manager approves the packing. */
++export const PACKING_QUEUE_STATUSES = ['IN_PROGRESS', 'COMPLETED'] as const;
++
++export const requirementKey = (form: string, sizeGrade: string, boxWeightKg: string): string => `${form}|${sizeGrade}|${toGrams(boxWeightKg)}`;
++
++/** Is the actual box weight within the tolerance of the required one? Exact integer arithmetic. */
++export function weightWithinTolerance(requiredKg: string, actualKg: string, tolerancePct = BOX_WEIGHT_TOLERANCE_PCT): boolean {
++  const required = toGrams(requiredKg);
++  const actual = toGrams(actualKg);
++  const diff = actual > required ? actual - required : required - actual;
++  return diff * 100n <= required * BigInt(tolerancePct);
++}
++
++export interface RequirementProgress {
++  requirementId: string;
++  required: number;
++  packed: number;
++  remaining: number;
++}
++
++export function progressFor(requirements: { id: string; quantity: number }[], boxes: { requirementId: string; status: string }[]): RequirementProgress[] {
++  return requirements.map((r) => {
++    const packed = boxes.filter((b) => b.requirementId === r.id && b.status === 'PACKED').length;
++    return { requirementId: r.id, required: r.quantity, packed, remaining: Math.max(0, r.quantity - packed) };
++  });
++}
+diff --git a/apps/api/src/modules/packing/schemas.ts b/apps/api/src/modules/packing/schemas.ts
+new file mode 100644
+index 0000000..b8bc7e8
+--- /dev/null
++++ b/apps/api/src/modules/packing/schemas.ts
+@@ -0,0 +1,46 @@
++import { z } from 'zod';
++import { paginationSchema } from '../../lib/pagination';
++import { toGrams } from '../../lib/quantity';
++import { BOX_FORMS, MAX_BOXES_PER_ENTRY, MAX_REQUIREMENT_LINES, requirementKey, SIZE_GRADES } from './rules';
++
++const boxWeight = z
++  .string()
++  .trim()
++  .regex(/^\d{1,4}(\.\d{1,3})?$/, 'Enter the box weight in kg, for example 10 or 2.5')
++  .refine((v) => toGrams(v) > 0n, 'Box weight must be more than zero');
++
++const line = z
++  .object({
++    form: z.enum(BOX_FORMS),
++    sizeGrade: z.enum(SIZE_GRADES),
++    boxWeightKg: boxWeight,
++    quantity: z.number({ invalid_type_error: 'Enter the number of boxes' }).int().min(1, 'At least 1 box').max(100_000),
++  })
++  .strict();
++
++export const boxPlanSchema = z
++  .object({ lines: z.array(line).min(1, 'Add at least one box requirement').max(MAX_REQUIREMENT_LINES) })
++  .strict()
++  .superRefine((v, ctx) => {
++    const seen = new Set<string>();
++    v.lines.forEach((l, i) => {
++      const key = requirementKey(l.form, l.sizeGrade, l.boxWeightKg);
++      if (seen.has(key)) ctx.addIssue({ code: 'custom', path: ['lines', i], message: 'This form, size and box weight is already listed' });
++      seen.add(key);
++    });
++  });
++export type BoxPlanInput = z.infer<typeof boxPlanSchema>;
++
++export const addBoxesSchema = z
++  .object({
++    requirementId: z.string().uuid('Choose the box requirement'),
++    netWeightKg: boxWeight,
++    count: z.number().int().min(1).max(MAX_BOXES_PER_ENTRY).default(1),
++  })
++  .strict();
++export type AddBoxesInput = z.infer<typeof addBoxesSchema>;
++
++export const assignIdsSchema = z.object({ boxIds: z.array(z.string().uuid()).min(1).max(500).optional() }).strict();
++export const voidBoxSchema = z.object({ reason: z.string().trim().min(5, 'Give a reason of at least 5 characters').max(300) }).strict();
++export const approvePackingSchema = z.object({ note: z.string().trim().max(300).optional() }).strict();
++export const listPackingQuerySchema = paginationSchema.extend({ state: z.enum(['open', 'approved']).optional() });
+diff --git a/apps/api/src/modules/packing/service.ts b/apps/api/src/modules/packing/service.ts
+new file mode 100644
+index 0000000..f562c84
+--- /dev/null
++++ b/apps/api/src/modules/packing/service.ts
+@@ -0,0 +1,304 @@
++import type { Prisma } from '@prisma/client';
++import { recordAudit } from '../../lib/audit';
++import { badRequest, conflict, forbidden, notFound } from '../../lib/errors';
++import { nextBoxNumber } from '../../lib/ids';
++import { lockRequest } from '../../lib/locks';
++import { pageMeta } from '../../lib/pagination';
++import { prisma } from '../../lib/prisma';
++import { fromGrams, toGrams } from '../../lib/quantity';
++import type { AuthUser } from '../../types/express';
++import { currentDeclaration } from '../procurement/view';
++import type { AddBoxesInput, BoxPlanInput } from './schemas';
++import { PACKING_QUEUE_STATUSES, progressFor, requirementKey, weightWithinTolerance } from './rules';
++
++const TERMINAL_REQUEST_STATUSES: string[] = ['REJECTED', 'CANCELLED'];
++
++const packingInclude = {
++  request: {
++    include: {
++      amendments: { orderBy: { seq: 'asc' } },
++      boxRequirements: { orderBy: [{ form: 'asc' }, { sizeGrade: 'asc' }, { boxWeightKg: 'asc' }] },
++      farmer: { include: { user: { select: { fullName: true } } } },
++    },
++  },
++  queueEntry: { select: { status: true } },
++  boxes: { orderBy: [{ packedAt: 'asc' }, { id: 'asc' }], include: { packedBy: { select: { fullName: true } } } },
++} satisfies Prisma.ShipmentInclude;
++
++type PackingRow = Prisma.ShipmentGetPayload<{ include: typeof packingInclude }>;
++
++const isPackingStage = (queueStatus: string | undefined): boolean => !!queueStatus && (PACKING_QUEUE_STATUSES as readonly string[]).includes(queueStatus);
++
++function toDto(row: PackingRow) {
++  const declaration = currentDeclaration(row.request, row.request.amendments);
++  const requirements = row.request.boxRequirements;
++  const progress = progressFor(requirements.map((r) => ({ id: r.id, quantity: r.quantity })), row.boxes);
++  const live = row.boxes.filter((b) => b.status === 'PACKED');
++  const requiredBoxes = requirements.reduce((n, r) => n + r.quantity, 0);
++  const packedGrams = live.reduce((n, b) => n + toGrams(b.netWeightKg.toFixed(3)), 0n);
++  const queueStatus = row.queueEntry?.status;
++  const approved = row.packingApprovedAt !== null;
++  return {
++    shipment: {
++      id: row.id,
++      code: row.code,
++      status: row.status,
++      receivedNetKg: row.netWeightKg?.toFixed(3) ?? null,
++      processing: queueStatus ?? null,
++      packingApprovedAt: row.packingApprovedAt,
++      packingNote: row.packingNote,
++    },
++    request: { id: row.request.id, code: row.request.code, species: declaration.species, declaredSizeCount: declaration.declaredSizeCount, farmerName: row.request.farmer.user.fullName },
++    requirements: requirements.map((r) => {
++      const p = progress.find((x) => x.requirementId === r.id)!;
++      return { id: r.id, form: r.form, sizeGrade: r.sizeGrade, boxWeightKg: r.boxWeightKg.toFixed(3), quantity: r.quantity, packed: p.packed, remaining: p.remaining };
++    }),
++    boxes: row.boxes.map((b) => ({
++      id: b.id,
++      requirementId: b.requirementId,
++      form: b.form,
++      sizeGrade: b.sizeGrade,
++      netWeightKg: b.netWeightKg.toFixed(3),
++      status: b.status,
++      boxNumber: b.boxNumber,
++      numberedAt: b.numberedAt,
++      voidReason: b.voidReason,
++      packedBy: b.packedBy.fullName,
++      packedAt: b.packedAt,
++    })),
++    summary: {
++      requiredBoxes,
++      packedBoxes: live.length,
++      numberedBoxes: live.filter((b) => b.boxNumber).length,
++      unnumberedBoxes: live.filter((b) => !b.boxNumber).length,
++      packedWeightKg: fromGrams(packedGrams),
++      complete: requirements.length > 0 && progress.every((p) => p.remaining === 0),
++    },
++    stage: {
++      hasPlan: requirements.length > 0,
++      // Operators may record boxes while the shipment is processed, until the manager approves the packing.
++      open: isPackingStage(queueStatus) && !approved,
++      canApprove: queueStatus === 'COMPLETED' && !approved,
++      approved,
++    },
++  };
++}
++
++async function loadRow(shipmentId: string): Promise<PackingRow> {
++  const row = await prisma.shipment.findUnique({ where: { id: shipmentId }, include: packingInclude, relationLoadStrategy: 'join' });
++  if (!row || !isPackingStage(row.queueEntry?.status)) throw notFound('This shipment is not in packing yet');
++  return row;
++}
++
++export async function getPacking(shipmentId: string) {
++  return toDto(await loadRow(shipmentId));
++}
++
++/** Shipments that are being processed (or finished) and so are in grading and packing. */
++export async function listPacking(query: { page: number; pageSize: number; state?: 'open' | 'approved' | undefined }) {
++  const where: Prisma.ShipmentWhereInput = {
++    queueEntry: { status: { in: [...PACKING_QUEUE_STATUSES] } },
++    ...(query.state === 'approved' ? { packingApprovedAt: { not: null } } : query.state === 'open' ? { packingApprovedAt: null } : {}),
++  };
++  const [rows, total] = await prisma.$transaction([
++    prisma.shipment.findMany({
++      where,
++      include: packingInclude,
++      relationLoadStrategy: 'join',
++      orderBy: [{ packingApprovedAt: { sort: 'asc', nulls: 'first' } }, { receivedAt: 'asc' }],
++      skip: (query.page - 1) * query.pageSize,
++      take: query.pageSize,
++    }),
++    prisma.shipment.count({ where }),
++  ]);
++  return {
++    items: rows.map((r) => {
++      const { shipment, request, summary, stage } = toDto(r);
++      return { shipment, request: { id: request.id, code: request.code, species: request.species }, summary, stage };
++    }),
++    meta: pageMeta(query.page, query.pageSize, total),
++  };
++}
++
++// ------------------------------------------------------------------ the box plan (purchase manager)
++
++/** What the purchase order requires, as lines of: form, size grade, box weight and number of boxes. */
++export async function getBoxPlan(requestId: string) {
++  const rows = await prisma.boxRequirement.findMany({ where: { requestId }, orderBy: [{ form: 'asc' }, { sizeGrade: 'asc' }, { boxWeightKg: 'asc' }] });
++  return rows.map((r) => ({ id: r.id, form: r.form, sizeGrade: r.sizeGrade, boxWeightKg: r.boxWeightKg.toFixed(3), quantity: r.quantity }));
++}
++
++/** Replaces the plan. Lines that already have boxes are kept (their quantity can change, never below what is packed). */
++export async function setBoxPlan(actor: AuthUser, requestId: string, input: BoxPlanInput, ip: string | undefined) {
++  await prisma.$transaction(async (tx) => {
++    await lockRequest(tx, requestId);
++    const request = await tx.procurementRequest.findUnique({ where: { id: requestId }, select: { status: true, shipments: { select: { packingApprovedAt: true } } } });
++    if (!request) throw notFound('Procurement request not found');
++    if (TERMINAL_REQUEST_STATUSES.includes(request.status)) throw conflict('INVALID_STATE', 'This request is closed, so its box plan cannot change');
++    if (request.shipments.some((s) => s.packingApprovedAt)) throw conflict('PACKING_APPROVED', 'Packing has been approved, so the box plan can no longer change');
++
++    const existing = await tx.boxRequirement.findMany({ where: { requestId }, include: { boxes: { select: { status: true } } } });
++    const wanted = new Map(input.lines.map((l) => [requirementKey(l.form, l.sizeGrade, l.boxWeightKg), l]));
++    const kept = new Set<string>();
++
++    for (const row of existing) {
++      const key = requirementKey(row.form, row.sizeGrade, row.boxWeightKg.toFixed(3));
++      const line = wanted.get(key);
++      const packed = row.boxes.filter((b) => b.status === 'PACKED').length;
++      if (line) {
++        kept.add(key);
++        if (line.quantity < packed) throw conflict('REQUIREMENT_IN_USE', `${row.sizeGrade} already has ${packed} packed boxes, so the quantity cannot go below that`);
++        if (line.quantity !== row.quantity) await tx.boxRequirement.update({ where: { id: row.id }, data: { quantity: line.quantity } });
++      } else if (row.boxes.length > 0) {
++        throw conflict('REQUIREMENT_IN_USE', `Boxes were already packed for ${row.sizeGrade} ${row.boxWeightKg.toFixed(3)} kg, so that line cannot be removed`);
++      } else {
++        await tx.boxRequirement.delete({ where: { id: row.id } });
++      }
++    }
++    for (const [key, line] of wanted) {
++      if (kept.has(key)) continue;
++      await tx.boxRequirement.create({ data: { requestId, form: line.form, sizeGrade: line.sizeGrade, boxWeightKg: line.boxWeightKg, quantity: line.quantity, createdById: actor.id } });
++    }
++    await recordAudit(tx, {
++      actorId: actor.id,
++      action: 'packing.plan_set',
++      entityType: 'ProcurementRequest',
++      entityId: requestId,
++      after: { lines: input.lines, totalBoxes: input.lines.reduce((n, l) => n + l.quantity, 0) },
++      ip,
++    });
++  });
++  return getBoxPlan(requestId);
++}
++
++// ------------------------------------------------------------------ packing (factory operator)
++
++async function lockShipment(tx: Prisma.TransactionClient, shipmentId: string) {
++  const ref = await tx.shipment.findUnique({ where: { id: shipmentId }, select: { requestId: true } });
++  if (!ref) throw notFound('Shipment not found');
++  await lockRequest(tx, ref.requestId);
++  return tx.shipment.findUniqueOrThrow({ where: { id: shipmentId }, select: { id: true, code: true, requestId: true, packingApprovedAt: true, queueEntry: { select: { status: true } } } });
++}
++
++/** The operator records boxes after grading: which requirement they fill and the actual net weight. */
++export async function addBoxes(actor: AuthUser, shipmentId: string, input: AddBoxesInput, ip: string | undefined) {
++  await prisma.$transaction(async (tx) => {
++    const shipment = await lockShipment(tx, shipmentId);
++    if (!isPackingStage(shipment.queueEntry?.status)) throw conflict('PACKING_NOT_OPEN', 'Packing opens once processing has started for this shipment');
++    if (shipment.packingApprovedAt) throw conflict('PACKING_APPROVED', 'Packing for this shipment has been approved');
++
++    const requirement = await tx.boxRequirement.findFirst({ where: { id: input.requirementId, requestId: shipment.requestId } });
++    if (!requirement) throw badRequest('INVALID_REQUIREMENT', 'Choose one of the boxes on the purchase order');
++    if (!weightWithinTolerance(requirement.boxWeightKg.toFixed(3), input.netWeightKg)) {
++      throw badRequest('WEIGHT_OUT_OF_TOLERANCE', `The purchase order needs ${requirement.boxWeightKg.toFixed(3)} kg boxes (allowed difference 2%)`);
++    }
++    const packed = await tx.packedBox.count({ where: { requirementId: requirement.id, shipmentId, status: 'PACKED' } });
++    if (packed + input.count > requirement.quantity) {
++      throw conflict('REQUIREMENT_FULFILLED', `Only ${Math.max(0, requirement.quantity - packed)} more ${requirement.sizeGrade} box(es) are needed`);
++    }
++    await tx.packedBox.createMany({
++      data: Array.from({ length: input.count }, () => ({ shipmentId, requirementId: requirement.id, form: requirement.form, sizeGrade: requirement.sizeGrade, netWeightKg: input.netWeightKg, packedById: actor.id })),
++    });
++    await recordAudit(tx, {
++      actorId: actor.id,
++      action: 'packing.boxes_added',
++      entityType: 'Shipment',
++      entityId: shipmentId,
++      after: { shipmentCode: shipment.code, form: requirement.form, sizeGrade: requirement.sizeGrade, netWeightKg: input.netWeightKg, count: input.count },
++      ip,
++    });
++  });
++  return getPacking(shipmentId);
++}
++
++// ------------------------------------------------------------------ box numbers, voids and approval (purchase manager)
++
++/** Gives each packed box its unique number. Without a list, every box that has no number yet is numbered, oldest first. */
++export async function assignBoxIds(actor: AuthUser, shipmentId: string, boxIds: string[] | undefined, ip: string | undefined) {
++  await prisma.$transaction(async (tx) => {
++    const shipment = await lockShipment(tx, shipmentId);
++    if (shipment.packingApprovedAt) throw conflict('PACKING_APPROVED', 'Packing for this shipment has been approved');
++    const boxes = await tx.packedBox.findMany({
++      where: { shipmentId, status: 'PACKED', boxNumber: null, ...(boxIds ? { id: { in: boxIds } } : {}) },
++      orderBy: [{ packedAt: 'asc' }, { id: 'asc' }],
++      select: { id: true },
++    });
++    if (boxes.length === 0) throw conflict('NOTHING_TO_NUMBER', 'There are no packed boxes waiting for a number');
++    const now = new Date();
++    const numbers: string[] = [];
++    for (const box of boxes) {
++      const boxNumber = await nextBoxNumber(tx, now);
++      numbers.push(boxNumber);
++      await tx.packedBox.update({ where: { id: box.id }, data: { boxNumber, numberedAt: now } });
++    }
++    await recordAudit(tx, {
++      actorId: actor.id,
++      action: 'packing.ids_assigned',
++      entityType: 'Shipment',
++      entityId: shipmentId,
++      after: { shipmentCode: shipment.code, count: numbers.length, first: numbers[0], last: numbers[numbers.length - 1] },
++      ip,
++    });
++  });
++  return getPacking(shipmentId);
++}
++
++/** The manager rejects a box that does not meet the order; it stops counting and the operator packs a replacement. */
++export async function voidBox(actor: AuthUser, shipmentId: string, boxId: string, reason: string, ip: string | undefined) {
++  await prisma.$transaction(async (tx) => {
++    const shipment = await lockShipment(tx, shipmentId);
++    if (shipment.packingApprovedAt) throw conflict('PACKING_APPROVED', 'Packing for this shipment has been approved');
++    const box = await tx.packedBox.findFirst({ where: { id: boxId, shipmentId } });
++    if (!box) throw notFound('Box not found');
++    if (box.status === 'VOID') throw conflict('ALREADY_VOID', 'This box is already voided');
++    await tx.packedBox.update({ where: { id: boxId }, data: { status: 'VOID', voidReason: reason, voidedAt: new Date() } });
++    await recordAudit(tx, {
++      actorId: actor.id,
++      action: 'packing.box_voided',
++      entityType: 'PackedBox',
++      entityId: boxId,
++      before: { status: box.status, boxNumber: box.boxNumber },
++      after: { status: 'VOID', reason, shipmentCode: shipment.code },
++      ip,
++    });
++  });
++  return getPacking(shipmentId);
++}
++
++/** Signs off the packing: every box is numbered and the order is met, or the manager records why it is accepted short. */
++export async function approvePacking(actor: AuthUser, shipmentId: string, note: string | undefined, ip: string | undefined) {
++  if (actor.role !== 'PURCHASE_MANAGER') throw forbidden('Only the purchase manager can approve packing');
++  await prisma.$transaction(async (tx) => {
++    const shipment = await lockShipment(tx, shipmentId);
++    if (shipment.packingApprovedAt) throw conflict('PACKING_APPROVED', 'Packing for this shipment has already been approved');
++    if (shipment.queueEntry?.status !== 'COMPLETED') throw conflict('PROCESSING_NOT_COMPLETE', 'Packing can be approved once processing is completed');
++
++    const [requirements, boxes] = await Promise.all([
++      tx.boxRequirement.findMany({ where: { requestId: shipment.requestId } }),
++      tx.packedBox.findMany({ where: { shipmentId, status: 'PACKED' }, select: { requirementId: true, status: true, boxNumber: true } }),
++    ]);
++    if (requirements.length === 0) throw conflict('BOX_PLAN_REQUIRED', 'Set the box requirements for this order first');
++    if (boxes.length === 0) throw conflict('NO_BOXES', 'No boxes have been packed yet');
++    if (boxes.some((b) => !b.boxNumber)) throw conflict('BOXES_NOT_NUMBERED', 'Give every packed box its number before approving');
++
++    const shortfalls = progressFor(requirements.map((r) => ({ id: r.id, quantity: r.quantity })), boxes)
++      .filter((p) => p.remaining > 0)
++      .map((p) => {
++        const r = requirements.find((x) => x.id === p.requirementId)!;
++        return { form: r.form, sizeGrade: r.sizeGrade, boxWeightKg: r.boxWeightKg.toFixed(3), missing: p.remaining };
++      });
++    if (shortfalls.length > 0 && (!note || note.length < 5)) {
++      throw conflict('PACKING_INCOMPLETE', `The order is not fully packed (${shortfalls.map((s) => `${s.missing} x ${s.sizeGrade}`).join(', ')} missing). Add a note to accept it as it is.`);
++    }
++    await tx.shipment.update({ where: { id: shipmentId }, data: { packingApprovedAt: new Date(), packingNote: note ?? null } });
++    await recordAudit(tx, {
++      actorId: actor.id,
++      action: 'packing.approved',
++      entityType: 'Shipment',
++      entityId: shipmentId,
++      after: { shipmentCode: shipment.code, boxes: boxes.length, shortfalls, note: note ?? null },
++      ip,
++    });
++  });
++  return getPacking(shipmentId);
++}
+diff --git a/apps/api/src/modules/payments/routes.ts b/apps/api/src/modules/payments/routes.ts
+new file mode 100644
+index 0000000..b3cb27f
+--- /dev/null
++++ b/apps/api/src/modules/payments/routes.ts
+@@ -0,0 +1,33 @@
++import { Router } from 'express';
++import { z } from 'zod';
++import { authenticate, requireRole } from '../../middleware/auth';
++import { decidePaymentSchema, listPaymentsQuerySchema, settlePaymentSchema } from './schemas';
++import * as service from './service';
++
++const shipmentParam = z.object({ shipmentId: z.string().uuid() });
++
++export function paymentsRouter(): Router {
++  const router = Router();
++  router.use(authenticate);
++
++  // Farmers see their own deliveries and invoices; the purchase manager and administrator see all of them.
++  router.get('/', requireRole('FARMER', 'PURCHASE_MANAGER', 'ADMIN'), async (req, res) => {
++    const { items, meta } = await service.listPayments(req.user!, listPaymentsQuerySchema.parse(req.query));
++    res.json({ data: items, meta });
++  });
++  router.get('/:shipmentId', requireRole('FARMER', 'PURCHASE_MANAGER', 'ADMIN'), async (req, res) => {
++    const { shipmentId } = shipmentParam.parse(req.params);
++    res.json({ data: await service.getPayment(req.user!, shipmentId) });
++  });
++
++  router.post('/:shipmentId/decide', requireRole('PURCHASE_MANAGER'), async (req, res) => {
++    const { shipmentId } = shipmentParam.parse(req.params);
++    res.status(201).json({ data: await service.decidePayment(req.user!, shipmentId, decidePaymentSchema.parse(req.body), req.ip) });
++  });
++  router.post('/:shipmentId/settle', requireRole('PURCHASE_MANAGER'), async (req, res) => {
++    const { shipmentId } = shipmentParam.parse(req.params);
++    res.json({ data: await service.settlePayment(req.user!, shipmentId, settlePaymentSchema.parse(req.body ?? {}), req.ip) });
++  });
++
++  return router;
++}
+diff --git a/apps/api/src/modules/payments/rules.ts b/apps/api/src/modules/payments/rules.ts
+new file mode 100644
+index 0000000..8bd33ee
+--- /dev/null
++++ b/apps/api/src/modules/payments/rules.ts
+@@ -0,0 +1,26 @@
++import { toGrams } from '../../lib/quantity';
++
++export const PAYMENT_METHODS = ['BANK_TRANSFER', 'UPI', 'CASH', 'CHEQUE'] as const;
++export const PAYMENT_METHOD_LABELS: Record<(typeof PAYMENT_METHODS)[number], string> = {
++  BANK_TRANSFER: 'Bank transfer',
++  UPI: 'UPI',
++  CASH: 'Cash',
++  CHEQUE: 'Cheque',
++};
++
++/** "123.45" -> 12345 paise. The rate has at most 2 decimal places. */
++function toPaise(rate: string): bigint {
++  const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(rate);
++  if (!m) throw new Error('Invalid rate');
++  return BigInt(m[1]!) * 100n + BigInt((m[2] ?? '').padEnd(2, '0'));
++}
++
++/** Amount = quantity (kg) x rate (INR per kg), in exact integer arithmetic, rounded half up to the paisa. */
++export function computeAmountInr(quantityKg: string, ratePerKg: string): string {
++  const grams = toGrams(quantityKg);
++  const paise = (grams * toPaise(ratePerKg) + 500n) / 1000n;
++  return `${paise / 100n}.${String(paise % 100n).padStart(2, '0')}`;
++}
++
++/** What the farmer is told. */
++export type PaymentState = 'AWAITING_DECISION' | 'PAY_LATER' | 'PAID';
+diff --git a/apps/api/src/modules/payments/schemas.ts b/apps/api/src/modules/payments/schemas.ts
+new file mode 100644
+index 0000000..2e9ed21
+--- /dev/null
++++ b/apps/api/src/modules/payments/schemas.ts
+@@ -0,0 +1,15 @@
++import { z } from 'zod';
++import { paginationSchema } from '../../lib/pagination';
++import { PAYMENT_METHODS } from './rules';
++
++const details = {
++  method: z.enum(PAYMENT_METHODS).optional(),
++  reference: z.string().trim().max(60, 'Keep the reference under 60 characters').optional(),
++};
++
++export const decidePaymentSchema = z.object({ option: z.enum(['PAY_NOW', 'PAY_LATER']), ...details }).strict();
++export const settlePaymentSchema = z.object(details).strict();
++export const listPaymentsQuerySchema = paginationSchema.extend({
++  state: z.enum(['AWAITING_DECISION', 'PAY_LATER', 'PAID']).optional(),
++  requestId: z.string().uuid().optional(),
++});
+diff --git a/apps/api/src/modules/payments/service.ts b/apps/api/src/modules/payments/service.ts
+new file mode 100644
+index 0000000..993402d
+--- /dev/null
++++ b/apps/api/src/modules/payments/service.ts
+@@ -0,0 +1,205 @@
++import type { Prisma } from '@prisma/client';
++import { recordAudit } from '../../lib/audit';
++import { conflict, isUniqueViolation, notFound } from '../../lib/errors';
++import { nextInvoiceNumber } from '../../lib/ids';
++import { lockRequest } from '../../lib/locks';
++import { pageMeta } from '../../lib/pagination';
++import { prisma } from '../../lib/prisma';
++import type { AuthUser } from '../../types/express';
++import { currentDeclaration } from '../procurement/view';
++import { computeAmountInr, type PaymentState } from './rules';
++import type { z } from 'zod';
++import type { decidePaymentSchema, settlePaymentSchema } from './schemas';
++
++type DecideInput = z.infer<typeof decidePaymentSchema>;
++type SettleInput = z.infer<typeof settlePaymentSchema>;
++
++const paymentInclude = {
++  payment: { include: { decidedBy: { select: { fullName: true } } } },
++  queueEntry: { select: { status: true } },
++  collectionJob: { select: { status: true, collectedQuantityKg: true, handedOverAt: true } },
++  request: {
++    include: {
++      amendments: { orderBy: { seq: 'asc' } },
++      farmer: { include: { user: { select: { fullName: true, email: true } } } },
++    },
++  },
++} satisfies Prisma.ShipmentInclude;
++
++type Row = Prisma.ShipmentGetPayload<{ include: typeof paymentInclude }>;
++
++const isStaff = (actor: AuthUser) => actor.role !== 'FARMER';
++
++/** Farmers see only their own deliveries. */
++function scopeFor(actor: AuthUser): Prisma.ShipmentWhereInput {
++  const delivered: Prisma.ShipmentWhereInput = { collectionJob: { status: 'HANDED_OVER' } };
++  return actor.role === 'FARMER' ? { ...delivered, request: { farmer: { userId: actor.id } } } : delivered;
++}
++
++/**
++ * Pay on the weight the factory recorded when there is one, otherwise on the quantity the transport officer
++ * collected from the farmer. The rate is the agreed price per kg (the current declaration).
++ */
++function basis(row: Row): { quantityKg: string; quantityBasis: 'FACTORY_WEIGHT' | 'COLLECTED_QUANTITY'; ratePerKg: string } {
++  const declaration = currentDeclaration(row.request, row.request.amendments);
++  const factory = row.netWeightKg?.toFixed(3);
++  return {
++    quantityKg: factory ?? row.collectionJob.collectedQuantityKg?.toFixed(3) ?? declaration.declaredQuantityKg,
++    quantityBasis: factory ? 'FACTORY_WEIGHT' : 'COLLECTED_QUANTITY',
++    ratePerKg: declaration.expectedPriceInrPerKg,
++  };
++}
++
++function stateOf(row: Row): PaymentState {
++  if (!row.payment) return 'AWAITING_DECISION';
++  return row.payment.status === 'PAID' ? 'PAID' : 'PAY_LATER';
++}
++
++function toDto(row: Row, actor: AuthUser) {
++  const declaration = currentDeclaration(row.request, row.request.amendments);
++  const state = stateOf(row);
++  const b = basis(row);
++  const p = row.payment;
++  const processingCompleted = row.queueEntry?.status === 'COMPLETED';
++  return {
++    shipmentId: row.id,
++    shipmentCode: row.code,
++    request: {
++      id: row.request.id,
++      code: row.request.code,
++      species: declaration.species,
++      declaredSizeCount: declaration.declaredSizeCount,
++      ...(isStaff(actor) ? { farmerName: row.request.farmer.user.fullName } : {}),
++    },
++    deliveredAt: row.collectionJob.handedOverAt,
++    state,
++    option: p?.option ?? null,
++    processingCompleted,
++    // Pay Later turns into a payment the manager can make once processing is completed.
++    canSettle: state === 'PAY_LATER' && processingCompleted,
++    estimate: { ...b, amountInr: computeAmountInr(b.quantityKg, b.ratePerKg) },
++    decidedAt: p?.decidedAt ?? null,
++    invoice:
++      p && p.status === 'PAID' && p.invoiceNumber
++        ? {
++            invoiceNumber: p.invoiceNumber,
++            invoicedAt: p.invoicedAt,
++            paidAt: p.paidAt,
++            quantityKg: p.quantityKg?.toFixed(3) ?? null,
++            quantityBasis: p.quantityBasis,
++            ratePerKg: p.ratePerKg?.toFixed(2) ?? null,
++            amountInr: p.amountInr?.toFixed(2) ?? null,
++            method: p.method,
++            reference: p.reference,
++            paidBy: p.decidedBy.fullName,
++            farmer: { name: row.request.farmer.user.fullName, email: row.request.farmer.user.email },
++          }
++        : null,
++  };
++}
++
++export async function listPayments(actor: AuthUser, query: { page: number; pageSize: number; state?: PaymentState | undefined; requestId?: string | undefined }) {
++  const where: Prisma.ShipmentWhereInput = {
++    ...scopeFor(actor),
++    ...(query.requestId ? { requestId: query.requestId } : {}),
++    ...(query.state === 'AWAITING_DECISION' ? { payment: { is: null } } : query.state ? { payment: { is: { status: query.state } } } : {}),
++  };
++  const [rows, total] = await prisma.$transaction([
++    prisma.shipment.findMany({
++      where,
++      include: paymentInclude,
++      relationLoadStrategy: 'join',
++      orderBy: [{ collectionJob: { handedOverAt: 'desc' } }, { id: 'asc' }],
++      skip: (query.page - 1) * query.pageSize,
++      take: query.pageSize,
++    }),
++    prisma.shipment.count({ where }),
++  ]);
++  return { items: rows.map((r) => toDto(r, actor)), meta: pageMeta(query.page, query.pageSize, total) };
++}
++
++export async function getPayment(actor: AuthUser, shipmentId: string) {
++  const row = await prisma.shipment.findFirst({ where: { id: shipmentId, ...scopeFor(actor) }, include: paymentInclude, relationLoadStrategy: 'join' });
++  if (!row) throw notFound('Payment not found');
++  return toDto(row, actor);
++}
++
++async function loadForUpdate(tx: Prisma.TransactionClient, shipmentId: string) {
++  const ref = await tx.shipment.findFirst({ where: { id: shipmentId, collectionJob: { status: 'HANDED_OVER' } }, select: { requestId: true } });
++  // Payment is only possible once the transport officer has handed the prawns over at the factory.
++  if (!ref) throw conflict('NOT_DELIVERED', 'Payment can be decided once the transport officer has delivered the prawns to the factory');
++  await lockRequest(tx, ref.requestId);
++  return tx.shipment.findUniqueOrThrow({ where: { id: shipmentId }, include: paymentInclude });
++}
++
++/** Writes the invoice details onto a payment row. */
++async function invoiceData(tx: Prisma.TransactionClient, row: Row, input: { method?: string | undefined; reference?: string | undefined }) {
++  const b = basis(row);
++  const now = new Date();
++  return {
++    status: 'PAID' as const,
++    invoiceNumber: await nextInvoiceNumber(tx, now),
++    invoicedAt: now,
++    paidAt: now,
++    quantityKg: b.quantityKg,
++    quantityBasis: b.quantityBasis,
++    ratePerKg: b.ratePerKg,
++    amountInr: computeAmountInr(b.quantityKg, b.ratePerKg),
++    method: input.method ?? null,
++    reference: input.reference ?? null,
++  };
++}
++
++/** Purchase manager chooses Pay Now (invoice is made and paid now) or Pay Later (after processing is completed). */
++export async function decidePayment(actor: AuthUser, shipmentId: string, input: DecideInput, ip: string | undefined) {
++  try {
++    await prisma.$transaction(async (tx) => {
++      const row = await loadForUpdate(tx, shipmentId);
++      if (row.payment) throw conflict('ALREADY_DECIDED', 'A payment option has already been chosen for this delivery');
++      const invoice = input.option === 'PAY_NOW' ? await invoiceData(tx, row, input) : null;
++      const created = await tx.payment.create({
++        data: {
++          shipmentId,
++          requestId: row.requestId,
++          option: input.option,
++          decidedById: actor.id,
++          ...(invoice ?? { status: 'PAY_LATER' as const }),
++        },
++      });
++      await recordAudit(tx, {
++        actorId: actor.id,
++        action: input.option === 'PAY_NOW' ? 'payment.pay_now' : 'payment.pay_later',
++        entityType: 'Payment',
++        entityId: created.id,
++        after: { shipmentCode: row.code, option: input.option, invoiceNumber: invoice?.invoiceNumber ?? null, amountInr: invoice?.amountInr ?? null },
++        ip,
++      });
++    });
++  } catch (err) {
++    if (isUniqueViolation(err)) throw conflict('ALREADY_DECIDED', 'A payment option has already been chosen for this delivery');
++    throw err;
++  }
++  return getPayment(actor, shipmentId);
++}
++
++/** Pay Later becomes a payment, with its invoice, once processing is completed. */
++export async function settlePayment(actor: AuthUser, shipmentId: string, input: SettleInput, ip: string | undefined) {
++  await prisma.$transaction(async (tx) => {
++    const row = await loadForUpdate(tx, shipmentId);
++    if (!row.payment) throw conflict('NOT_DECIDED', 'Choose Pay Now or Pay Later first');
++    if (row.payment.status === 'PAID') throw conflict('ALREADY_PAID', 'This delivery has already been paid');
++    if (row.queueEntry?.status !== 'COMPLETED') throw conflict('PROCESSING_NOT_COMPLETE', 'Pay Later payments can be made once processing is completed');
++    const invoice = await invoiceData(tx, row, input);
++    await tx.payment.update({ where: { shipmentId }, data: invoice });
++    await recordAudit(tx, {
++      actorId: actor.id,
++      action: 'payment.settled',
++      entityType: 'Payment',
++      entityId: row.payment.id,
++      before: { status: 'PAY_LATER' },
++      after: { shipmentCode: row.code, invoiceNumber: invoice.invoiceNumber, amountInr: invoice.amountInr },
++      ip,
++    });
++  });
++  return getPayment(actor, shipmentId);
++}
+diff --git a/apps/api/tests/integration/packingAndPayments.test.ts b/apps/api/tests/integration/packingAndPayments.test.ts
+new file mode 100644
+index 0000000..836df82
+--- /dev/null
++++ b/apps/api/tests/integration/packingAndPayments.test.ts
+@@ -0,0 +1,145 @@
++import { beforeAll, describe, expect, it } from 'vitest';
++import { computeAmountInr } from '../../src/modules/payments/rules';
++import {
++  createFactoryStaff, createStaff, createStation, get, post, queuedShipment, receivedShipment,
++  type FactoryStaff, type Staff,
++} from './helpers';
++
++let staff: Staff;
++let fs: FactoryStaff;
++beforeAll(async () => {
++  staff = await createStaff();
++  fs = await createFactoryStaff();
++});
++
++const put = (token: string, path: string, body: Record<string, unknown>) =>
++  import('supertest').then(({ default: request }) => import('./helpers').then(({ app, bearer }) => request(app).put(`/api/v1${path}`).set(bearer(token)).send(body)));
++
++const plan = (lines: Record<string, unknown>[]) => ({ lines });
++const line = (over: Record<string, unknown> = {}) => ({ form: 'HEADLESS', sizeGrade: '20-30', boxWeightKg: '10', quantity: 2, ...over });
++
++/** A shipment that is being processed, with the manager's box plan already set. */
++async function processingShipment(lines = [line()]) {
++  const q = await queuedShipment(staff, fs);
++  expect((await put(staff.managerToken, `/packing/plans/${q.id}`, plan(lines))).status).toBe(200);
++  const station = await createStation(staff);
++  expect((await post(fs.operatorToken, `/queue/${q.queueId}/start`, { stationId: station.id })).status).toBe(200);
++  return { ...q, station };
++}
++
++const pack = (token: string, shipmentId: string, body: Record<string, unknown>) => post(token, `/packing/${shipmentId}/boxes`, body);
++
++describe('box plan and packing', () => {
++  it('only the purchase manager sets the box plan', async () => {
++    const q = await queuedShipment(staff, fs);
++    expect((await put(fs.operatorToken, `/packing/plans/${q.id}`, plan([line()]))).status).toBe(403);
++    expect((await put(q.farmerToken, `/packing/plans/${q.id}`, plan([line()]))).status).toBe(403);
++    expect((await put(staff.managerToken, `/packing/plans/${q.id}`, plan([line(), line()]))).status).toBe(400); // duplicate line
++    expect((await put(staff.managerToken, `/packing/plans/${q.id}`, plan([line()]))).status).toBe(200);
++  });
++
++  it('operators pack boxes that follow the plan: right size, right weight, no more than ordered', async () => {
++    const s = await processingShipment();
++    const requirementId = (await get(fs.operatorToken, `/packing/${s.shipmentId}`)).body.data.requirements[0].id as string;
++
++    expect((await pack(fs.operatorToken, s.shipmentId, { requirementId, netWeightKg: '12', count: 1 })).body.error.code).toBe('WEIGHT_OUT_OF_TOLERANCE');
++    expect((await pack(staff.managerToken, s.shipmentId, { requirementId, netWeightKg: '10' })).status).toBe(403);
++    const ok = await pack(fs.operatorToken, s.shipmentId, { requirementId, netWeightKg: '10.1', count: 2 });
++    expect(ok.status).toBe(201);
++    expect(ok.body.data.summary).toMatchObject({ packedBoxes: 2, requiredBoxes: 2, complete: true });
++    expect((await pack(fs.operatorToken, s.shipmentId, { requirementId, netWeightKg: '10' })).body.error.code).toBe('REQUIREMENT_FULFILLED');
++  });
++
++  it('the manager numbers every box uniquely, can void one, and approves once the order is met', async () => {
++    const s = await processingShipment();
++    const requirementId = (await get(fs.operatorToken, `/packing/${s.shipmentId}`)).body.data.requirements[0].id as string;
++    await pack(fs.operatorToken, s.shipmentId, { requirementId, netWeightKg: '10', count: 2 });
++
++    expect((await post(staff.managerToken, `/packing/${s.shipmentId}/approve`)).body.error.code).toBe('PROCESSING_NOT_COMPLETE');
++    expect((await post(fs.operatorToken, `/packing/${s.shipmentId}/assign-ids`)).status).toBe(403);
++
++    const numbered = await post(staff.managerToken, `/packing/${s.shipmentId}/assign-ids`);
++    expect(numbered.status).toBe(200);
++    const numbers = numbered.body.data.boxes.map((b: { boxNumber: string }) => b.boxNumber);
++    expect(new Set(numbers).size).toBe(2);
++    expect(numbers[0]).toMatch(/^BOX-\d{4}-\d{6}$/);
++    expect((await post(staff.managerToken, `/packing/${s.shipmentId}/assign-ids`)).body.error.code).toBe('NOTHING_TO_NUMBER');
++
++    // A voided box stops counting, so the order is short by one until a replacement is packed.
++    const voided = await post(staff.managerToken, `/packing/${s.shipmentId}/boxes/${numbered.body.data.boxes[0].id}/void`, { reason: 'Torn box' });
++    expect(voided.body.data.summary.packedBoxes).toBe(1);
++    await pack(fs.operatorToken, s.shipmentId, { requirementId, netWeightKg: '10', count: 1 });
++    await post(staff.managerToken, `/packing/${s.shipmentId}/assign-ids`);
++
++    expect((await post(fs.operatorToken, `/queue/${s.queueId}/complete`, {})).status).toBe(200);
++    const approved = await post(staff.managerToken, `/packing/${s.shipmentId}/approve`);
++    expect(approved.status).toBe(200);
++    expect(approved.body.data.stage.approved).toBe(true);
++    expect((await pack(fs.operatorToken, s.shipmentId, { requirementId, netWeightKg: '10' })).status).toBe(409);
++  });
++
++  it('an order that is not fully packed needs a note to approve', async () => {
++    const s = await processingShipment([line({ quantity: 3 })]);
++    const requirementId = (await get(fs.operatorToken, `/packing/${s.shipmentId}`)).body.data.requirements[0].id as string;
++    await pack(fs.operatorToken, s.shipmentId, { requirementId, netWeightKg: '10', count: 1 });
++    await post(staff.managerToken, `/packing/${s.shipmentId}/assign-ids`);
++    await post(fs.operatorToken, `/queue/${s.queueId}/complete`, {});
++    expect((await post(staff.managerToken, `/packing/${s.shipmentId}/approve`)).body.error.code).toBe('PACKING_INCOMPLETE');
++    expect((await post(staff.managerToken, `/packing/${s.shipmentId}/approve`, { note: 'Farmer supplied less; accepted' })).status).toBe(200);
++  });
++
++  it('packing needs a box plan', async () => {
++    const q = await queuedShipment(staff, fs);
++    const station = await createStation(staff);
++    await post(fs.operatorToken, `/queue/${q.queueId}/start`, { stationId: station.id });
++    const view = await get(fs.operatorToken, `/packing/${q.shipmentId}`);
++    expect(view.body.data.stage.hasPlan).toBe(false);
++  });
++});
++
++describe('payment after delivery', () => {
++  it('Pay Now makes an invoice the farmer can see straight away', async () => {
++    const r = await receivedShipment(staff, fs);
++    const before = await get(r.farmerToken, '/payments');
++    expect(before.body.data.find((p: { shipmentId: string }) => p.shipmentId === r.shipmentId).state).toBe('AWAITING_DECISION');
++
++    expect((await post(r.farmerToken, `/payments/${r.shipmentId}/decide`, { option: 'PAY_NOW' })).status).toBe(403);
++    const paid = await post(staff.managerToken, `/payments/${r.shipmentId}/decide`, { option: 'PAY_NOW', method: 'UPI', reference: 'UTR123' });
++    expect(paid.status).toBe(201);
++    const invoice = paid.body.data.invoice;
++    expect(invoice.invoiceNumber).toMatch(/^INV-\d{4}-\d{6}$/);
++    expect(invoice.amountInr).toBe(computeAmountInr(invoice.quantityKg, invoice.ratePerKg));
++    expect(invoice.quantityBasis).toBe('FACTORY_WEIGHT');
++
++    const mine = await get(r.farmerToken, `/payments/${r.shipmentId}`);
++    expect(mine.body.data.state).toBe('PAID');
++    expect(mine.body.data.invoice.invoiceNumber).toBe(invoice.invoiceNumber);
++    expect((await post(staff.managerToken, `/payments/${r.shipmentId}/decide`, { option: 'PAY_LATER' })).body.error.code).toBe('ALREADY_DECIDED');
++  });
++
++  it('Pay Later shows a waiting status to the farmer and can be paid after processing is completed', async () => {
++    const q = await queuedShipment(staff, fs);
++    const later = await post(staff.managerToken, `/payments/${q.shipmentId}/decide`, { option: 'PAY_LATER' });
++    expect(later.status).toBe(201);
++    expect(later.body.data).toMatchObject({ state: 'PAY_LATER', invoice: null, canSettle: false });
++    expect((await get(q.farmerToken, `/payments/${q.shipmentId}`)).body.data.state).toBe('PAY_LATER');
++    expect((await post(staff.managerToken, `/payments/${q.shipmentId}/settle`)).body.error.code).toBe('PROCESSING_NOT_COMPLETE');
++
++    const station = await createStation(staff);
++    await post(fs.operatorToken, `/queue/${q.queueId}/start`, { stationId: station.id });
++    await post(fs.operatorToken, `/queue/${q.queueId}/complete`, {});
++    expect((await get(staff.managerToken, `/payments/${q.shipmentId}`)).body.data.canSettle).toBe(true);
++    const settled = await post(staff.managerToken, `/payments/${q.shipmentId}/settle`, { method: 'BANK_TRANSFER' });
++    expect(settled.status).toBe(200);
++    expect(settled.body.data.state).toBe('PAID');
++    expect(settled.body.data.invoice.invoiceNumber).toBeTruthy();
++  });
++
++  it('farmers cannot see other farmers’ payments, and undelivered shipments have no payment', async () => {
++    const a = await receivedShipment(staff, fs);
++    const b = await receivedShipment(staff, fs);
++    expect((await get(a.farmerToken, `/payments/${b.shipmentId}`)).status).toBe(404);
++    const list = await get(a.farmerToken, '/payments');
++    expect(list.body.data.every((p: { shipmentId: string }) => p.shipmentId !== b.shipmentId)).toBe(true);
++  });
++});
+diff --git a/apps/api/tests/unit/packingAndPaymentRules.test.ts b/apps/api/tests/unit/packingAndPaymentRules.test.ts
+new file mode 100644
+index 0000000..0605cd4
+--- /dev/null
++++ b/apps/api/tests/unit/packingAndPaymentRules.test.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it } from 'vitest';
++import { progressFor, requirementKey, weightWithinTolerance } from '../../src/modules/packing/rules';
++import { boxPlanSchema } from '../../src/modules/packing/schemas';
++import { computeAmountInr } from '../../src/modules/payments/rules';
++
++describe('box weight tolerance', () => {
++  it('allows up to 2% either way and nothing more', () => {
++    expect(weightWithinTolerance('10', '10')).toBe(true);
++    expect(weightWithinTolerance('10', '10.2')).toBe(true);
++    expect(weightWithinTolerance('10', '9.8')).toBe(true);
++    expect(weightWithinTolerance('10', '10.201')).toBe(false);
++    expect(weightWithinTolerance('10', '9.799')).toBe(false);
++    expect(weightWithinTolerance('2.5', '2.55')).toBe(true);
++  });
++});
++
++describe('requirement progress', () => {
++  it('counts only boxes that are not voided', () => {
++    const progress = progressFor(
++      [{ id: 'a', quantity: 3 }, { id: 'b', quantity: 1 }],
++      [{ requirementId: 'a', status: 'PACKED' }, { requirementId: 'a', status: 'VOID' }, { requirementId: 'b', status: 'PACKED' }],
++    );
++    expect(progress).toEqual([
++      { requirementId: 'a', required: 3, packed: 1, remaining: 2 },
++      { requirementId: 'b', required: 1, packed: 1, remaining: 0 },
++    ]);
++  });
++
++  it('treats 10 and 10.000 kg as the same box size', () => {
++    expect(requirementKey('HEAD_ON', '20-30', '10')).toBe(requirementKey('HEAD_ON', '20-30', '10.000'));
++  });
++});
++
++describe('box plan validation', () => {
++  const line = { form: 'HEADLESS', sizeGrade: '30-40', boxWeightKg: '10', quantity: 20 };
++  it('accepts a normal plan and rejects duplicates, unknown sizes and bad weights', () => {
++    expect(boxPlanSchema.safeParse({ lines: [line, { ...line, form: 'HEAD_ON' }] }).success).toBe(true);
++    expect(boxPlanSchema.safeParse({ lines: [line, { ...line, boxWeightKg: '10.000' }] }).success).toBe(false);
++    expect(boxPlanSchema.safeParse({ lines: [{ ...line, sizeGrade: '5-6' }] }).success).toBe(false);
++    expect(boxPlanSchema.safeParse({ lines: [{ ...line, boxWeightKg: '0' }] }).success).toBe(false);
++    expect(boxPlanSchema.safeParse({ lines: [] }).success).toBe(false);
++  });
++});
++
++describe('invoice amount', () => {
++  it('multiplies kilograms by the rate exactly, rounding to the paisa', () => {
++    expect(computeAmountInr('1000.000', '450.00')).toBe('450000.00');
++    expect(computeAmountInr('412.500', '388.75')).toBe('160359.38');
++    expect(computeAmountInr('0.001', '0.50')).toBe('0.00');
++    expect(computeAmountInr('1.000', '99.99')).toBe('99.99');
++  });
++});
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 4a79d1b..b852a41 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -10,6 +10,8 @@ import { FactorySetupPage } from './pages/FactorySetupPage';
+ import { GatePage } from './pages/GatePage';
+ import { ForbiddenPage, NotFoundPage } from './pages/MiscPages';
+ import { NewRequestPage } from './pages/NewRequestPage';
++import { PackingDetailPage, PackingPage } from './pages/PackingPages';
++import { InvoicePage, PaymentsPage } from './pages/PaymentPages';
+ import { QueuePage } from './pages/QueuePage';
+ import { RequestDetailPage } from './pages/RequestDetailPage';
+ import { RequestsPage } from './pages/RequestsPage';
+@@ -56,6 +58,12 @@ export function App() {
+             <Route path="shipments" element={<ShipmentsPage />} />
+             <Route path="shipments/:id" element={<ShipmentDetailPage />} />
+             <Route path="queue" element={<QueuePage />} />
++            <Route path="packing" element={<PackingPage />} />
++            <Route path="packing/:shipmentId" element={<PackingDetailPage />} />
++          </Route>
++          <Route element={<RequireAuth roles={['FARMER', 'PURCHASE_MANAGER', 'ADMIN']} />}>
++            <Route path="payments" element={<PaymentsPage />} />
++            <Route path="payments/:shipmentId/invoice" element={<InvoicePage />} />
+           </Route>
+           <Route element={<RequireAuth roles={['ADMIN']} />}>
+             <Route path="vehicles" element={<VehiclesPage />} />
+diff --git a/apps/web/src/components/BoxPlanCard.tsx b/apps/web/src/components/BoxPlanCard.tsx
+new file mode 100644
+index 0000000..21541f5
+--- /dev/null
++++ b/apps/web/src/components/BoxPlanCard.tsx
+@@ -0,0 +1,83 @@
++import { useEffect, useState } from 'react';
++import { useBoxPlan, useSetBoxPlan } from '../features/packing/hooks';
++import { errorMessage } from '../lib/errors';
++import { BOX_FORM_LABELS, SIZE_GRADES, sizeLabel, type BoxForm } from '../lib/types';
++import { Alert, Button, Card, Spinner } from './ui';
++
++interface Draft { form: BoxForm; sizeGrade: string; boxWeightKg: string; quantity: string }
++const blank = (): Draft => ({ form: 'HEADLESS', sizeGrade: '20-30', boxWeightKg: '10', quantity: '1' });
++
++/**
++ * The purchase order's box requirements: how many boxes of which form, size grade and weight.
++ * The factory can only pack what is listed here, so the manager's order is followed.
++ */
++export function BoxPlanCard({ requestId, canEdit }: { requestId: string; canEdit: boolean }) {
++  const plan = useBoxPlan(requestId);
++  const save = useSetBoxPlan(requestId);
++  const [rows, setRows] = useState<Draft[]>([]);
++  const [error, setError] = useState<string | null>(null);
++  const [saved, setSaved] = useState(false);
++
++  useEffect(() => {
++    if (plan.data) setRows(plan.data.map((l) => ({ form: l.form, sizeGrade: l.sizeGrade, boxWeightKg: String(Number(l.boxWeightKg)), quantity: String(l.quantity) })));
++  }, [plan.data]);
++
++  if (plan.isLoading) return <Card><Spinner label="Loading box requirements" /></Card>;
++  if (plan.isError) return <Card><Alert tone="error">{errorMessage(plan.error)}</Alert></Card>;
++
++  const set = (i: number, patch: Partial<Draft>) => { setSaved(false); setRows(rows.map((r, k) => (k === i ? { ...r, ...patch } : r))); };
++  const total = rows.reduce((n, r) => n + (Number(r.quantity) || 0), 0);
++  const invalid = rows.length === 0 || rows.some((r) => !(Number(r.boxWeightKg) > 0) || !Number.isInteger(Number(r.quantity)) || Number(r.quantity) < 1);
++
++  const submit = async () => {
++    setError(null);
++    try {
++      await save.mutateAsync(rows.map((r) => ({ form: r.form, sizeGrade: r.sizeGrade, boxWeightKg: r.boxWeightKg.trim(), quantity: Number(r.quantity) })));
++      setSaved(true);
++    } catch (err) {
++      setError(errorMessage(err));
++    }
++  };
++
++  return (
++    <Card>
++      <h2 className="mb-1 text-base font-semibold">Box requirements</h2>
++      <p className="mb-3 text-sm text-slate-600">{canEdit ? 'Say how the order must be packed. The factory packs only these boxes, and you approve the packing against this list.' : 'How the order must be packed.'}</p>
++      {error && <div className="mb-3"><Alert tone="error">{error}</Alert></div>}
++      {rows.length === 0 && !canEdit && <p className="text-sm text-slate-600">No box requirements have been set yet.</p>}
++      <div className="space-y-2">
++        {rows.map((r, i) => (
++          <div key={i} className="grid grid-cols-2 items-end gap-2 sm:grid-cols-[1fr_1fr_1fr_1fr_auto]">
++            <label className="text-xs font-medium text-slate-700">Form
++              <select disabled={!canEdit} value={r.form} onChange={(e) => set(i, { form: e.target.value as BoxForm })} className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm">
++                {(Object.keys(BOX_FORM_LABELS) as BoxForm[]).map((f) => <option key={f} value={f}>{BOX_FORM_LABELS[f]}</option>)}
++              </select>
++            </label>
++            <label className="text-xs font-medium text-slate-700">Size grade
++              <select disabled={!canEdit} value={r.sizeGrade} onChange={(e) => set(i, { sizeGrade: e.target.value })} className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm">
++                {SIZE_GRADES.map((g) => <option key={g} value={g}>{sizeLabel(g)}</option>)}
++              </select>
++            </label>
++            <label className="text-xs font-medium text-slate-700">Box weight (kg)
++              <input disabled={!canEdit} inputMode="decimal" value={r.boxWeightKg} onChange={(e) => set(i, { boxWeightKg: e.target.value })} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-2 text-sm" />
++            </label>
++            <label className="text-xs font-medium text-slate-700">Number of boxes
++              <input disabled={!canEdit} inputMode="numeric" value={r.quantity} onChange={(e) => set(i, { quantity: e.target.value })} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-2 text-sm" />
++            </label>
++            {canEdit && <Button variant="secondary" onClick={() => { setSaved(false); setRows(rows.filter((_, k) => k !== i)); }}>Remove</Button>}
++          </div>
++        ))}
++      </div>
++      {canEdit && (
++        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
++          <Button variant="secondary" onClick={() => { setSaved(false); setRows([...rows, blank()]); }}>Add a line</Button>
++          <div className="flex items-center gap-3">
++            <span className="text-sm text-slate-600">{total} boxes in total</span>
++            {saved && <span className="text-sm text-green-700">Saved</span>}
++            <Button onClick={() => void submit()} disabled={invalid} loading={save.isPending}>Save requirements</Button>
++          </div>
++        </div>
++      )}
++    </Card>
++  );
++}
+diff --git a/apps/web/src/components/Layout.tsx b/apps/web/src/components/Layout.tsx
+index db10b75..1af665c 100644
+--- a/apps/web/src/components/Layout.tsx
++++ b/apps/web/src/components/Layout.tsx
+@@ -15,7 +15,7 @@ export function navItemsFor(role: Role): NavItem[] {
+   const dashboard: NavItem = { to: '/', label: 'Dashboard', end: true };
+   switch (role) {
+     case 'FARMER':
+-      return [dashboard, { to: '/requests', label: 'My requests', end: true }, { to: '/requests/new', label: 'New request' }];
++      return [dashboard, { to: '/requests', label: 'My requests', end: true }, { to: '/requests/new', label: 'New request' }, { to: '/payments', label: 'My payments' }];
+     case 'PURCHASE_MANAGER':
+       return [
+         dashboard,
+@@ -25,6 +25,8 @@ export function navItemsFor(role: Role): NavItem[] {
+         { to: '/schedule', label: 'Arrival schedule' },
+         { to: '/shipments', label: 'Shipments' },
+         { to: '/queue', label: 'Processing queue' },
++        { to: '/packing', label: 'Grading & packing' },
++        { to: '/payments', label: 'Payments' },
+         { to: '/exceptions', label: 'Exceptions' },
+         { to: '/factory/slots', label: 'Slots' },
+       ];
+@@ -35,7 +37,7 @@ export function navItemsFor(role: Role): NavItem[] {
+     case 'SECURITY_OFFICER':
+       return [dashboard, { to: '/gate', label: 'Gate' }];
+     case 'FACTORY_OPERATOR':
+-      return [dashboard, { to: '/shipments', label: 'Shipments' }, { to: '/queue', label: 'Processing queue' }];
++      return [dashboard, { to: '/shipments', label: 'Shipments' }, { to: '/queue', label: 'Processing queue' }, { to: '/packing', label: 'Grading & packing' }];
+     case 'ADMIN':
+       return [
+         dashboard,
+@@ -45,6 +47,8 @@ export function navItemsFor(role: Role): NavItem[] {
+         { to: '/schedule', label: 'Arrival schedule' },
+         { to: '/shipments', label: 'Shipments' },
+         { to: '/queue', label: 'Processing queue' },
++        { to: '/packing', label: 'Grading & packing' },
++        { to: '/payments', label: 'Payments' },
+         { to: '/exceptions', label: 'Exceptions' },
+         { to: '/factory/slots', label: 'Slots & stations' },
+         { to: '/vehicles', label: 'Vehicles' },
+diff --git a/apps/web/src/components/PaymentParts.tsx b/apps/web/src/components/PaymentParts.tsx
+new file mode 100644
+index 0000000..636f92e
+--- /dev/null
++++ b/apps/web/src/components/PaymentParts.tsx
+@@ -0,0 +1,37 @@
++import { Link } from 'react-router-dom';
++import { formatDate, formatInr, formatKg } from '../lib/format';
++import type { PaymentRow } from '../lib/types';
++import { Pill } from './ui';
++
++/** The plain-language payment status shown to the farmer (and to staff). */
++export function paymentMessage(p: PaymentRow): string {
++  if (p.state === 'PAID') return `Paid on ${formatDate(p.invoice!.paidAt)}. Invoice ${p.invoice!.invoiceNumber}.`;
++  if (p.state === 'PAY_LATER') {
++    return p.processingCompleted ? 'Processing is completed. Your payment will be credited shortly.' : 'Your payment will be credited after the processing is completed.';
++  }
++  return 'Your prawns have reached the factory. The purchase manager is deciding how to pay.';
++}
++
++export function PaymentPill({ state }: { state: PaymentRow['state'] }) {
++  if (state === 'PAID') return <Pill tone="green">Paid</Pill>;
++  if (state === 'PAY_LATER') return <Pill tone="blue">Pay later</Pill>;
++  return <Pill tone="amber">Awaiting decision</Pill>;
++}
++
++/** One delivery's payment status, with a link to the invoice once it exists. */
++export function PaymentLine({ p, showRequest = false }: { p: PaymentRow; showRequest?: boolean }) {
++  return (
++    <li className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm">
++      <span>
++        <span className="font-medium">{showRequest ? <Link className="text-teal-800 underline" to={`/requests/${p.request.id}`}>{p.request.code}</Link> : p.shipmentCode}</span>
++        <span className="text-slate-600"> · {p.request.species} · {formatKg(p.estimate.quantityKg)}</span>
++        <span className="mt-0.5 block text-slate-700">{paymentMessage(p)}</span>
++        {p.invoice && <span className="mt-0.5 block text-slate-600">Amount {formatInr(p.invoice.amountInr)}</span>}
++      </span>
++      <span className="flex flex-col items-end gap-2">
++        <PaymentPill state={p.state} />
++        {p.invoice && <Link className="text-teal-800 underline" to={`/payments/${p.shipmentId}/invoice`}>View invoice</Link>}
++      </span>
++    </li>
++  );
++}
+diff --git a/apps/web/src/features/packing/hooks.ts b/apps/web/src/features/packing/hooks.ts
+new file mode 100644
+index 0000000..e487a37
+--- /dev/null
++++ b/apps/web/src/features/packing/hooks.ts
+@@ -0,0 +1,41 @@
++import { keepPreviousData, useQuery } from '@tanstack/react-query';
++import { api } from '../../lib/api';
++import { useAction } from '../../lib/mutations';
++import type { BoxPlanLine, Paged, PackingDetail, PackingListItem } from '../../lib/types';
++
++const KEYS = ['packing', 'boxPlan'] as const;
++const post = <T,>(path: string, body: unknown = {}) => api<T>(path, { method: 'POST', body }).then((r) => r.data);
++
++const act = <TInput,>(fn: (input: TInput) => Promise<PackingDetail>) => useAction(fn, KEYS, 'packing', (d) => d.shipment.id);
++
++export function usePackingList(params: { page: number; state?: 'open' | 'approved' | undefined }) {
++  return useQuery({
++    queryKey: ['packing', 'list', params],
++    queryFn: async (): Promise<Paged<PackingListItem>> => {
++      const res = await api<PackingListItem[]>('/packing', { query: { page: params.page, pageSize: 20, state: params.state } });
++      return { items: res.data, meta: res.meta! };
++    },
++    placeholderData: keepPreviousData,
++  });
++}
++
++export const usePacking = (shipmentId: string) =>
++  useQuery({ queryKey: ['packing', 'detail', shipmentId], queryFn: async () => (await api<PackingDetail>(`/packing/${shipmentId}`)).data });
++
++export const useBoxPlan = (requestId: string, enabled = true) =>
++  useQuery({ queryKey: ['boxPlan', requestId], queryFn: async () => (await api<BoxPlanLine[]>(`/packing/plans/${requestId}`)).data, enabled });
++
++export const useSetBoxPlan = (requestId: string) =>
++  useAction(
++    (lines: { form: string; sizeGrade: string; boxWeightKg: string; quantity: number }[]) =>
++      api<BoxPlanLine[]>(`/packing/plans/${requestId}`, { method: 'PUT', body: { lines } }).then((r) => r.data),
++    KEYS,
++  );
++
++export const useAddBoxes = (shipmentId: string) =>
++  act((input: { requirementId: string; netWeightKg: string; count: number }) => post<PackingDetail>(`/packing/${shipmentId}/boxes`, input));
++export const useAssignBoxIds = (shipmentId: string) => act(() => post<PackingDetail>(`/packing/${shipmentId}/assign-ids`));
++export const useVoidBox = (shipmentId: string) =>
++  act(({ boxId, reason }: { boxId: string; reason: string }) => post<PackingDetail>(`/packing/${shipmentId}/boxes/${boxId}/void`, { reason }));
++export const useApprovePacking = (shipmentId: string) =>
++  act((input: { note?: string }) => post<PackingDetail>(`/packing/${shipmentId}/approve`, input));
+diff --git a/apps/web/src/features/payments/hooks.ts b/apps/web/src/features/payments/hooks.ts
+new file mode 100644
+index 0000000..5a26ed7
+--- /dev/null
++++ b/apps/web/src/features/payments/hooks.ts
+@@ -0,0 +1,29 @@
++import { keepPreviousData, useQuery } from '@tanstack/react-query';
++import { api } from '../../lib/api';
++import { useAction } from '../../lib/mutations';
++import type { Paged, PaymentRow, PaymentState } from '../../lib/types';
++
++const KEYS = ['payments', 'stats'] as const;
++const post = <T,>(path: string, body: unknown = {}) => api<T>(path, { method: 'POST', body }).then((r) => r.data);
++
++export function usePayments(params: { page?: number; pageSize?: number; state?: PaymentState | undefined; requestId?: string | undefined }, enabled = true) {
++  return useQuery({
++    queryKey: ['payments', 'list', params],
++    queryFn: async (): Promise<Paged<PaymentRow>> => {
++      const res = await api<PaymentRow[]>('/payments', { query: { page: params.page ?? 1, pageSize: params.pageSize ?? 20, state: params.state, requestId: params.requestId } });
++      return { items: res.data, meta: res.meta! };
++    },
++    placeholderData: keepPreviousData,
++    enabled,
++  });
++}
++
++export const usePayment = (shipmentId: string) =>
++  useQuery({ queryKey: ['payments', 'detail', shipmentId], queryFn: async () => (await api<PaymentRow>(`/payments/${shipmentId}`)).data });
++
++const act = <TInput,>(fn: (input: TInput) => Promise<PaymentRow>) => useAction(fn, KEYS, 'payments', (d) => d.shipmentId);
++
++export const useDecidePayment = (shipmentId: string) =>
++  act((input: { option: 'PAY_NOW' | 'PAY_LATER'; method?: string; reference?: string }) => post<PaymentRow>(`/payments/${shipmentId}/decide`, input));
++export const useSettlePayment = (shipmentId: string) =>
++  act((input: { method?: string; reference?: string }) => post<PaymentRow>(`/payments/${shipmentId}/settle`, input));
+diff --git a/apps/web/src/lib/api.ts b/apps/web/src/lib/api.ts
+index 54bbe85..5caf6d2 100644
+--- a/apps/web/src/lib/api.ts
++++ b/apps/web/src/lib/api.ts
+@@ -80,7 +80,7 @@ export function refreshSession(): Promise<SessionPayload | null> {
+ }
+ 
+ interface RequestOptions {
+-  method?: 'GET' | 'POST' | 'PATCH';
++  method?: 'GET' | 'POST' | 'PATCH' | 'PUT';
+   body?: unknown;
+   /** Multipart upload (photos). The browser sets the Content-Type boundary itself. */
+   form?: FormData;
+diff --git a/apps/web/src/lib/mutations.ts b/apps/web/src/lib/mutations.ts
+index e09bd6f..3ea9e19 100644
+--- a/apps/web/src/lib/mutations.ts
++++ b/apps/web/src/lib/mutations.ts
+@@ -11,12 +11,13 @@ export function useAction<TInput, TOutput = unknown>(
+   fn: (input: TInput) => Promise<TOutput>,
+   keys: readonly string[],
+   detailKey?: string,
++  idOf: (data: TOutput) => unknown = (data) => (data as { id?: unknown } | null | undefined)?.id,
+ ) {
+   const queryClient = useQueryClient();
+   return useMutation({
+     mutationFn: fn,
+     onSuccess: (data) => {
+-      const id = (data as { id?: unknown } | null | undefined)?.id;
++      const id = idOf(data);
+       if (detailKey && typeof id === 'string') queryClient.setQueryData([detailKey, 'detail', id], data);
+       for (const key of keys) {
+         void queryClient.invalidateQueries({ queryKey: key === detailKey ? [key, 'list'] : [key] });
+diff --git a/apps/web/src/lib/types.ts b/apps/web/src/lib/types.ts
+index 8a270fc..5272d5d 100644
+--- a/apps/web/src/lib/types.ts
++++ b/apps/web/src/lib/types.ts
+@@ -469,3 +469,44 @@ export interface QueueEntry {
+   notes: string | null;
+   timer: Timer;
+ }
++
++// ---------------------------------------------------------------- packing and payments
++export type BoxForm = 'HEAD_ON' | 'HEADLESS';
++export const BOX_FORM_LABELS: Record<BoxForm, string> = { HEAD_ON: 'Head-on', HEADLESS: 'Headless' };
++export const SIZE_GRADES = ['10-20', '20-30', '30-40', '40-50', '50-60', '60-70', '70-80', '80-100'] as const;
++export const sizeLabel = (grade: string) => grade.replace('-', '–');
++
++export interface BoxPlanLine { id?: string; form: BoxForm; sizeGrade: string; boxWeightKg: string; quantity: number }
++export interface PackingRequirement { id: string; form: BoxForm; sizeGrade: string; boxWeightKg: string; quantity: number; packed: number; remaining: number }
++export interface PackedBox {
++  id: string; requirementId: string; form: BoxForm; sizeGrade: string; netWeightKg: string; status: 'PACKED' | 'VOID';
++  boxNumber: string | null; numberedAt: string | null; voidReason: string | null; packedBy: string; packedAt: string;
++}
++export interface PackingSummary { requiredBoxes: number; packedBoxes: number; numberedBoxes: number; unnumberedBoxes: number; packedWeightKg: string; complete: boolean }
++export interface PackingStage { hasPlan: boolean; open: boolean; canApprove: boolean; approved: boolean }
++export interface PackingShipment { id: string; code: string; status: string; receivedNetKg: string | null; processing: string | null; packingApprovedAt: string | null; packingNote: string | null }
++export interface PackingDetail {
++  shipment: PackingShipment;
++  request: { id: string; code: string; species: string; declaredSizeCount: string; farmerName: string };
++  requirements: PackingRequirement[];
++  boxes: PackedBox[];
++  summary: PackingSummary;
++  stage: PackingStage;
++}
++export interface PackingListItem { shipment: PackingShipment; request: { id: string; code: string; species: string }; summary: PackingSummary; stage: PackingStage }
++
++export type PaymentState = 'AWAITING_DECISION' | 'PAY_LATER' | 'PAID';
++export const PAYMENT_METHODS = ['BANK_TRANSFER', 'UPI', 'CASH', 'CHEQUE'] as const;
++export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
++export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = { BANK_TRANSFER: 'Bank transfer', UPI: 'UPI', CASH: 'Cash', CHEQUE: 'Cheque' };
++export interface Invoice {
++  invoiceNumber: string; invoicedAt: string; paidAt: string; quantityKg: string; quantityBasis: 'FACTORY_WEIGHT' | 'COLLECTED_QUANTITY';
++  ratePerKg: string; amountInr: string; method: string | null; reference: string | null; paidBy: string; farmer: { name: string; email: string };
++}
++export interface PaymentRow {
++  shipmentId: string; shipmentCode: string;
++  request: { id: string; code: string; species: string; declaredSizeCount: string; farmerName?: string };
++  deliveredAt: string | null; state: PaymentState; option: 'PAY_NOW' | 'PAY_LATER' | null; processingCompleted: boolean; canSettle: boolean;
++  estimate: { quantityKg: string; quantityBasis: 'FACTORY_WEIGHT' | 'COLLECTED_QUANTITY'; ratePerKg: string; amountInr: string };
++  decidedAt: string | null; invoice: Invoice | null;
++}
+diff --git a/apps/web/src/pages/DashboardPage.tsx b/apps/web/src/pages/DashboardPage.tsx
+index 4f246ab..bd1cb02 100644
+--- a/apps/web/src/pages/DashboardPage.tsx
++++ b/apps/web/src/pages/DashboardPage.tsx
+@@ -1,8 +1,10 @@
+ import { Link } from 'react-router-dom';
+ import { useAuth } from '../auth/AuthContext';
++import { PaymentLine } from '../components/PaymentParts';
+ import { Alert, Card, EmptyState, PageHeader, Spinner, StatusBadge } from '../components/ui';
+ import { useBookings, useExceptions, useQueue, useShipments, useTicker } from '../features/factory/hooks';
+ import { useCollections, useInspections } from '../features/fieldwork/hooks';
++import { usePayments } from '../features/payments/hooks';
+ import { useRequests, useRequestStats } from '../features/procurement/hooks';
+ import { errorMessage } from '../lib/errors';
+ import { formatDateTime, formatKg } from '../lib/format';
+@@ -104,6 +106,35 @@ function OperatorDashboard() {
+   );
+ }
+ 
++/** The farmer's payment status for each delivery, with the invoice once paid. */
++function FarmerPayments() {
++  const q = usePayments({ pageSize: 5 });
++  if (q.isLoading || !q.data || q.data.items.length === 0) return null;
++  return (
++    <Card>
++      <div className="mb-1 flex items-center justify-between">
++        <h2 className="text-base font-semibold">Payments</h2>
++        <Link to="/payments" className="text-sm font-medium text-teal-800 underline">View all</Link>
++      </div>
++      <ul className="divide-y divide-slate-100">{q.data.items.map((p) => <PaymentLine key={p.shipmentId} p={p} showRequest />)}</ul>
++    </Card>
++  );
++}
++
++/** For the purchase manager: deliveries waiting for Pay Now or Pay Later, and Pay Later ones that can now be paid. */
++function PaymentsToDecide() {
++  const waiting = usePayments({ state: 'AWAITING_DECISION', pageSize: 1 });
++  const later = usePayments({ state: 'PAY_LATER', pageSize: 50 });
++  const ready = later.data?.items.filter((p) => p.canSettle).length ?? 0;
++  if (!waiting.data) return null;
++  return (
++    <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
++      <StatCard label="Payment decision needed" value={waiting.data.meta.total} tone="alert" to="/payments?state=AWAITING_DECISION" />
++      <StatCard label="Pay later, ready to pay" value={ready} to="/payments?state=PAY_LATER" />
++    </div>
++  );
++}
++
+ function ProcurementDashboard({ scope }: { scope: 'own' | 'all' }) {
+   const stats = useRequestStats();
+   const recent = useRequests({ page: 1, pageSize: 5, sort: 'createdAt', order: 'desc' });
+@@ -117,6 +148,8 @@ function ProcurementDashboard({ scope }: { scope: 'own' | 'all' }) {
+   return (
+     <div className="space-y-6">
+       {manager && <ManagerFactoryStrip />}
++      {manager && <PaymentsToDecide />}
++      {scope === 'own' && <FarmerPayments />}
+       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+         <StatCard label={scope === 'own' ? 'My requests' : 'All requests'} value={data.total} />
+         <StatCard label="Awaiting review" value={summary.awaitingReview} to="/requests?status=SUBMITTED" />
+diff --git a/apps/web/src/pages/PackingPages.tsx b/apps/web/src/pages/PackingPages.tsx
+new file mode 100644
+index 0000000..be6fd93
+--- /dev/null
++++ b/apps/web/src/pages/PackingPages.tsx
+@@ -0,0 +1,192 @@
++import { useState } from 'react';
++import { Link, useParams, useSearchParams } from 'react-router-dom';
++import { useAuth } from '../auth/AuthContext';
++import { ReasonDialog } from '../components/ReasonDialog';
++import { Alert, Button, Card, EmptyState, PageHeader, Pagination, Pill, SelectField, Spinner, TextField } from '../components/ui';
++import { useAddBoxes, useApprovePacking, useAssignBoxIds, usePacking, usePackingList, useVoidBox } from '../features/packing/hooks';
++import { errorMessage } from '../lib/errors';
++import { formatDateTime, formatKg } from '../lib/format';
++import { BOX_FORM_LABELS, sizeLabel, type PackingRequirement } from '../lib/types';
++
++const requirementLabel = (r: PackingRequirement) => `${BOX_FORM_LABELS[r.form]} · ${sizeLabel(r.sizeGrade)} · ${Number(r.boxWeightKg)} kg boxes`;
++
++export function PackingPage() {
++  const [params, setParams] = useSearchParams();
++  const page = Number(params.get('page') ?? 1) || 1;
++  const state = params.get('state') === 'approved' ? 'approved' : params.get('state') === 'open' ? 'open' : undefined;
++  const list = usePackingList({ page, state });
++
++  return (
++    <div className="space-y-4">
++      <PageHeader title="Grading and packing" description="Shipments being processed. Workers separate head-on and headless, grade by size and pack into boxes; the purchase manager numbers and approves the boxes." />
++      <div className="flex gap-2 text-sm">
++        {([['', 'All'], ['open', 'Open'], ['approved', 'Approved']] as const).map(([v, label]) => (
++          <button key={v} type="button" onClick={() => setParams(v ? { state: v } : {})} className={`rounded-full px-3 py-1 ${(state ?? '') === v ? 'bg-teal-700 text-white' : 'bg-slate-200 text-slate-700'}`}>{label}</button>
++        ))}
++      </div>
++      {list.isLoading ? <Spinner /> : list.isError ? <Alert tone="error">{errorMessage(list.error)}</Alert> : list.data!.items.length === 0 ? (
++        <EmptyState title="Nothing to pack">Shipments appear here once processing has started.</EmptyState>
++      ) : (
++        <Card>
++          <ul className="divide-y divide-slate-100 text-sm">
++            {list.data!.items.map((i) => (
++              <li key={i.shipment.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
++                <span>
++                  <Link className="font-medium text-teal-800 underline" to={`/packing/${i.shipment.id}`}>{i.shipment.code}</Link> · {i.request.species}
++                  <span className="block text-slate-600">
++                    {i.stage.hasPlan ? `${i.summary.packedBoxes} of ${i.summary.requiredBoxes} boxes packed · ${i.summary.numberedBoxes} numbered` : 'Waiting for the purchase manager’s box requirements'}
++                  </span>
++                </span>
++                {i.stage.approved ? <Pill tone="green">Approved</Pill> : i.summary.complete ? <Pill tone="blue">Ready to approve</Pill> : <Pill tone="amber">Packing</Pill>}
++              </li>
++            ))}
++          </ul>
++          <Pagination page={list.data!.meta.page} totalPages={list.data!.meta.totalPages} total={list.data!.meta.total} onChange={(p) => setParams({ ...(state ? { state } : {}), page: String(p) })} />
++        </Card>
++      )}
++    </div>
++  );
++}
++
++function RecordBoxes({ shipmentId, requirements }: { shipmentId: string; requirements: PackingRequirement[] }) {
++  const add = useAddBoxes(shipmentId);
++  const open = requirements.filter((r) => r.remaining > 0);
++  const [requirementId, setRequirementId] = useState('');
++  const [weight, setWeight] = useState('');
++  const [count, setCount] = useState('1');
++  const [error, setError] = useState<string | null>(null);
++  const chosen = open.find((r) => r.id === requirementId);
++
++  if (open.length === 0) return <Alert tone="success">Every box on the order is packed.</Alert>;
++  const invalid = !chosen || !(Number(weight) > 0) || !Number.isInteger(Number(count)) || Number(count) < 1 || Number(count) > chosen.remaining;
++
++  const submit = async () => {
++    setError(null);
++    try {
++      await add.mutateAsync({ requirementId, netWeightKg: weight.trim(), count: Number(count) });
++      setCount('1');
++    } catch (err) {
++      setError(errorMessage(err));
++    }
++  };
++
++  return (
++    <div className="space-y-3">
++      {error && <Alert tone="error">{error}</Alert>}
++      <SelectField label="Box type" value={requirementId} onChange={(e) => { const r = open.find((x) => x.id === e.target.value); setRequirementId(e.target.value); setWeight(r ? String(Number(r.boxWeightKg)) : ''); setCount('1'); }}>
++        <option value="">Choose the box you packed…</option>
++        {open.map((r) => <option key={r.id} value={r.id}>{requirementLabel(r)} ({r.remaining} still needed)</option>)}
++      </SelectField>
++      <div className="grid grid-cols-2 gap-3">
++        <TextField label="Net weight of each box (kg)" inputMode="decimal" value={weight} onChange={(e) => setWeight(e.target.value)} hint={chosen ? `Ordered: ${Number(chosen.boxWeightKg)} kg (2% allowed)` : undefined} />
++        <TextField label="Number of boxes" inputMode="numeric" value={count} onChange={(e) => setCount(e.target.value)} hint={chosen ? `Up to ${chosen.remaining}` : undefined} />
++      </div>
++      <Button onClick={() => void submit()} disabled={invalid} loading={add.isPending}>Add boxes</Button>
++    </div>
++  );
++}
++
++export function PackingDetailPage() {
++  const { shipmentId = '' } = useParams();
++  const { user } = useAuth();
++  const q = usePacking(shipmentId);
++  const assign = useAssignBoxIds(shipmentId);
++  const voidBox = useVoidBox(shipmentId);
++  const approve = useApprovePacking(shipmentId);
++  const [error, setError] = useState<string | null>(null);
++  const [voiding, setVoiding] = useState<string | null>(null);
++  const [approving, setApproving] = useState(false);
++
++  if (q.isLoading) return <Spinner />;
++  if (q.isError) return <Alert tone="error">{errorMessage(q.error)}</Alert>;
++  const d = q.data!;
++  const manager = user?.role === 'PURCHASE_MANAGER';
++  const operator = user?.role === 'FACTORY_OPERATOR';
++
++  const run = async (fn: () => Promise<unknown>) => {
++    setError(null);
++    try { await fn(); } catch (err) { setError(errorMessage(err)); }
++  };
++  const incomplete = !d.summary.complete;
++
++  return (
++    <div className="space-y-4">
++      <PageHeader
++        title={`Grading and packing · ${d.shipment.code}`}
++        description={`${d.request.code} · ${d.request.species} · ${d.request.farmerName}${d.shipment.receivedNetKg ? ` · received ${formatKg(d.shipment.receivedNetKg)}` : ''}`}
++        actions={d.stage.approved ? <Pill tone="green">Packing approved</Pill> : <Pill tone="amber">{d.shipment.processing === 'COMPLETED' ? 'Processing completed' : 'Processing'}</Pill>}
++      />
++      {error && <Alert tone="error">{error}</Alert>}
++      {d.stage.approved && <Alert tone="success">Approved on {formatDateTime(d.shipment.packingApprovedAt!)}.{d.shipment.packingNote ? ` Note: ${d.shipment.packingNote}` : ''}</Alert>}
++      {!d.stage.hasPlan && (
++        <Alert tone="warning">
++          The purchase manager has not set the box requirements for this order yet, so boxes cannot be packed.{' '}
++          {manager && <Link className="underline" to={`/requests/${d.request.id}`}>Set them on the request.</Link>}
++        </Alert>
++      )}
++
++      {d.stage.hasPlan && (
++        <Card>
++          <h2 className="mb-3 text-base font-semibold">Purchase order boxes</h2>
++          <div className="overflow-x-auto">
++            <table className="w-full text-left text-sm">
++              <thead className="text-xs uppercase text-slate-500"><tr><th className="py-2 pr-3">Form</th><th className="pr-3">Size grade</th><th className="pr-3">Box weight</th><th className="pr-3">Packed</th><th>Ordered</th></tr></thead>
++              <tbody className="divide-y divide-slate-100">
++                {d.requirements.map((r) => (
++                  <tr key={r.id}>
++                    <td className="py-2 pr-3">{BOX_FORM_LABELS[r.form]}</td><td className="pr-3">{sizeLabel(r.sizeGrade)}</td><td className="pr-3">{Number(r.boxWeightKg)} kg</td>
++                    <td className="pr-3">{r.packed}{r.remaining === 0 ? ' ✓' : ''}</td><td>{r.quantity}</td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++          <p className="mt-2 text-xs text-slate-500">{d.summary.packedBoxes} of {d.summary.requiredBoxes} boxes packed · {formatKg(d.summary.packedWeightKg)} packed</p>
++        </Card>
++      )}
++
++      {operator && d.stage.open && d.stage.hasPlan && <Card><h2 className="mb-3 text-base font-semibold">Record packed boxes</h2><RecordBoxes shipmentId={shipmentId} requirements={d.requirements} /></Card>}
++
++      <Card>
++        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
++          <h2 className="text-base font-semibold">Boxes</h2>
++          {manager && !d.stage.approved && (
++            <div className="flex flex-wrap gap-2">
++              <Button variant="secondary" onClick={() => void run(() => assign.mutateAsync(undefined))} loading={assign.isPending} disabled={d.summary.unnumberedBoxes === 0}>Assign box numbers ({d.summary.unnumberedBoxes})</Button>
++              <Button onClick={() => setApproving(true)} disabled={!d.stage.canApprove || d.summary.unnumberedBoxes > 0 || d.summary.packedBoxes === 0}>Approve packing</Button>
++            </div>
++          )}
++        </div>
++        {manager && !d.stage.approved && !d.stage.canApprove && <p className="mb-3 text-sm text-slate-600">Packing can be approved once processing is completed.</p>}
++        {d.boxes.length === 0 ? <p className="text-sm text-slate-600">No boxes packed yet.</p> : (
++          <div className="overflow-x-auto">
++            <table className="w-full text-left text-sm">
++              <thead className="text-xs uppercase text-slate-500"><tr><th className="py-2 pr-3">Box number</th><th className="pr-3">Form</th><th className="pr-3">Size</th><th className="pr-3">Net weight</th><th className="pr-3">Packed by</th><th /></tr></thead>
++              <tbody className="divide-y divide-slate-100">
++                {d.boxes.map((b) => (
++                  <tr key={b.id} className={b.status === 'VOID' ? 'text-slate-400 line-through' : ''}>
++                    <td className="py-2 pr-3 font-mono">{b.boxNumber ?? <span className="font-sans text-amber-800 no-underline">Awaiting number</span>}</td>
++                    <td className="pr-3">{BOX_FORM_LABELS[b.form]}</td><td className="pr-3">{sizeLabel(b.sizeGrade)}</td><td className="pr-3">{formatKg(b.netWeightKg)}</td><td className="pr-3">{b.packedBy}</td>
++                    <td className="text-right">{b.status === 'VOID' ? <span className="text-xs no-underline">Voided: {b.voidReason}</span> : manager && !d.stage.approved && <Button variant="secondary" onClick={() => setVoiding(b.id)}>Void</Button>}</td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        )}
++      </Card>
++
++      <ReasonDialog open={voiding !== null} title="Void this box" description="A voided box stops counting towards the order and the factory packs a replacement." label="Why is it rejected?" confirmLabel="Void box" tone="danger" onClose={() => setVoiding(null)} onConfirm={async (reason) => { await voidBox.mutateAsync({ boxId: voiding!, reason }); setVoiding(null); }} />
++      <ReasonDialog
++        open={approving}
++        title="Approve packing"
++        description={incomplete ? 'The order is not fully packed. Give a note to accept it as it is.' : 'Every box is packed and numbered, and matches the purchase order.'}
++        label="Note"
++        confirmLabel="Approve"
++        required={incomplete}
++        onClose={() => setApproving(false)}
++        onConfirm={async (note) => { await approve.mutateAsync(note.trim() ? { note: note.trim() } : {}); setApproving(false); }}
++      />
++    </div>
++  );
++}
+diff --git a/apps/web/src/pages/PaymentPages.tsx b/apps/web/src/pages/PaymentPages.tsx
+new file mode 100644
+index 0000000..71f0c12
+--- /dev/null
++++ b/apps/web/src/pages/PaymentPages.tsx
+@@ -0,0 +1,155 @@
++import { useState } from 'react';
++import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
++import { useAuth } from '../auth/AuthContext';
++import { PaymentLine, PaymentPill, paymentMessage } from '../components/PaymentParts';
++import { Alert, Button, Card, Dialog, EmptyState, PageHeader, Pagination, SelectField, Spinner, TextField } from '../components/ui';
++import { useDecidePayment, usePayment, usePayments, useSettlePayment } from '../features/payments/hooks';
++import { errorMessage } from '../lib/errors';
++import { formatDate, formatDateTime, formatInr, formatKg } from '../lib/format';
++import { PAYMENT_METHODS, PAYMENT_METHOD_LABELS, type PaymentRow, type PaymentState } from '../lib/types';
++
++const BASIS_TEXT = { FACTORY_WEIGHT: 'Weight recorded at the factory', COLLECTED_QUANTITY: 'Quantity collected at the farm' } as const;
++
++/** Pay Now, Pay Later, or paying a Pay Later delivery after processing. */
++function PayDialog({ row, mode, onClose }: { row: PaymentRow; mode: 'PAY_NOW' | 'PAY_LATER' | 'SETTLE'; onClose: () => void }) {
++  const decide = useDecidePayment(row.shipmentId);
++  const settle = useSettlePayment(row.shipmentId);
++  const [method, setMethod] = useState('');
++  const [reference, setReference] = useState('');
++  const [error, setError] = useState<string | null>(null);
++  const paying = mode !== 'PAY_LATER';
++  const busy = decide.isPending || settle.isPending;
++
++  const submit = async () => {
++    setError(null);
++    const details = { ...(method ? { method } : {}), ...(reference.trim() ? { reference: reference.trim() } : {}) };
++    try {
++      if (mode === 'SETTLE') await settle.mutateAsync(details);
++      else await decide.mutateAsync({ option: mode, ...(paying ? details : {}) });
++      onClose();
++    } catch (err) {
++      setError(errorMessage(err));
++    }
++  };
++
++  return (
++    <Dialog open title={mode === 'PAY_LATER' ? 'Pay later' : mode === 'SETTLE' ? 'Pay now (after processing)' : 'Pay now'} onClose={onClose}>
++      {error && <div className="mb-4"><Alert tone="error">{error}</Alert></div>}
++      {paying ? (
++        <div className="space-y-4">
++          <p className="text-sm text-slate-600">An invoice is created and shown to the farmer straight away.</p>
++          <dl className="grid grid-cols-2 gap-2 rounded-md bg-slate-50 p-3 text-sm">
++            <dt className="text-slate-600">Quantity</dt><dd>{formatKg(row.estimate.quantityKg)}</dd>
++            <dt className="text-slate-600">Rate</dt><dd>{formatInr(row.estimate.ratePerKg)} per kg</dd>
++            <dt className="font-medium">Amount</dt><dd className="font-semibold">{formatInr(row.estimate.amountInr)}</dd>
++          </dl>
++          <p className="text-xs text-slate-500">{BASIS_TEXT[row.estimate.quantityBasis]}.</p>
++          <SelectField label="Paid by (optional)" value={method} onChange={(e) => setMethod(e.target.value)}>
++            <option value="">Not recorded</option>
++            {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>)}
++          </SelectField>
++          <TextField label="Reference (optional)" value={reference} onChange={(e) => setReference(e.target.value)} hint="For example a bank or UPI transaction number" />
++        </div>
++      ) : (
++        <p className="text-sm text-slate-600">The farmer will be told the payment will be credited after processing is completed. You can pay it from this page once processing is done.</p>
++      )}
++      <div className="mt-5 flex justify-end gap-3">
++        <Button variant="secondary" onClick={onClose}>Back</Button>
++        <Button onClick={() => void submit()} loading={busy}>{mode === 'PAY_LATER' ? 'Confirm pay later' : 'Pay and create invoice'}</Button>
++      </div>
++    </Dialog>
++  );
++}
++
++export function PaymentsPage() {
++  const { user } = useAuth();
++  const [params, setParams] = useSearchParams();
++  const page = Number(params.get('page') ?? 1) || 1;
++  const raw = params.get('state');
++  const state = raw === 'AWAITING_DECISION' || raw === 'PAY_LATER' || raw === 'PAID' ? (raw as PaymentState) : undefined;
++  const list = usePayments({ page, state });
++  const [dialog, setDialog] = useState<{ row: PaymentRow; mode: 'PAY_NOW' | 'PAY_LATER' | 'SETTLE' } | null>(null);
++  const manager = user?.role === 'PURCHASE_MANAGER';
++  const farmer = user?.role === 'FARMER';
++
++  return (
++    <div className="space-y-4">
++      <PageHeader title={farmer ? 'My payments' : 'Payments'} description={farmer ? 'Payment status and invoices for prawns you delivered.' : 'Once the transport officer has delivered the prawns to the factory, choose Pay Now or Pay Later.'} />
++      <div className="flex flex-wrap gap-2 text-sm">
++        {([['', 'All'], ['AWAITING_DECISION', 'Awaiting decision'], ['PAY_LATER', 'Pay later'], ['PAID', 'Paid']] as const).map(([v, label]) => (
++          <button key={v} type="button" onClick={() => setParams(v ? { state: v } : {})} className={`rounded-full px-3 py-1 ${(state ?? '') === v ? 'bg-teal-700 text-white' : 'bg-slate-200 text-slate-700'}`}>{label}</button>
++        ))}
++      </div>
++      {list.isLoading ? <Spinner /> : list.isError ? <Alert tone="error">{errorMessage(list.error)}</Alert> : list.data!.items.length === 0 ? (
++        <EmptyState title="No payments yet">Deliveries appear here once the transport officer has handed the prawns over at the factory.</EmptyState>
++      ) : (
++        <Card>
++          <ul className="divide-y divide-slate-100">
++            {list.data!.items.map((p) => (
++              <li key={p.shipmentId} className="py-1">
++                {farmer ? <ul><PaymentLine p={p} showRequest /></ul> : (
++                  <div className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm">
++                    <span>
++                      <Link className="font-medium text-teal-800 underline" to={`/requests/${p.request.id}`}>{p.request.code}</Link> · {p.shipmentCode} · {p.request.species}
++                      <span className="block text-slate-600">{p.request.farmerName} · {formatKg(p.estimate.quantityKg)} × {formatInr(p.estimate.ratePerKg)} = <strong>{formatInr(p.invoice?.amountInr ?? p.estimate.amountInr)}</strong></span>
++                      <span className="block text-slate-600">{p.deliveredAt ? `Delivered ${formatDateTime(p.deliveredAt)} · ` : ''}{paymentMessage(p)}</span>
++                    </span>
++                    <span className="flex flex-col items-end gap-2">
++                      <PaymentPill state={p.state} />
++                      {p.invoice && <Link className="text-teal-800 underline" to={`/payments/${p.shipmentId}/invoice`}>View invoice</Link>}
++                      {manager && p.state === 'AWAITING_DECISION' && (
++                        <span className="flex gap-2"><Button onClick={() => setDialog({ row: p, mode: 'PAY_NOW' })}>Pay now</Button><Button variant="secondary" onClick={() => setDialog({ row: p, mode: 'PAY_LATER' })}>Pay later</Button></span>
++                      )}
++                      {manager && p.canSettle && <Button onClick={() => setDialog({ row: p, mode: 'SETTLE' })}>Pay now</Button>}
++                    </span>
++                  </div>
++                )}
++              </li>
++            ))}
++          </ul>
++          <Pagination page={list.data!.meta.page} totalPages={list.data!.meta.totalPages} total={list.data!.meta.total} onChange={(n) => setParams({ ...(state ? { state } : {}), page: String(n) })} />
++        </Card>
++      )}
++      {dialog && <PayDialog row={dialog.row} mode={dialog.mode} onClose={() => setDialog(null)} />}
++    </div>
++  );
++}
++
++/** A printable invoice. Shown to the farmer who was paid, and to the purchase manager and administrator. */
++export function InvoicePage() {
++  const { shipmentId = '' } = useParams();
++  const q = usePayment(shipmentId);
++  const navigate = useNavigate();
++  if (q.isLoading) return <Spinner />;
++  if (q.isError) return <Alert tone="error">{errorMessage(q.error)}</Alert>;
++  const p = q.data!;
++  const inv = p.invoice;
++  if (!inv) return <Alert tone="info">{paymentMessage(p)}</Alert>;
++
++  return (
++    <div className="mx-auto max-w-2xl space-y-4">
++      <div className="flex items-center justify-between print:hidden">
++        <Button variant="secondary" onClick={() => navigate(-1)}>← Back</Button>
++        <Button variant="secondary" onClick={() => window.print()}>Print or save as PDF</Button>
++      </div>
++      <Card>
++        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-4">
++          <div><h1 className="text-xl font-semibold">Invoice</h1><p className="text-sm text-slate-600">Prawn Factory Management System</p></div>
++          <div className="text-right text-sm"><p className="font-mono font-semibold">{inv.invoiceNumber}</p><p className="text-slate-600">Issued {formatDate(inv.invoicedAt)}</p><p className="mt-1 inline-block rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">Paid {formatDate(inv.paidAt)}</p></div>
++        </div>
++        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 py-4 text-sm">
++          <dt className="text-slate-600">Paid to</dt><dd>{inv.farmer.name}</dd>
++          <dt className="text-slate-600">Purchase order</dt><dd>{p.request.code}</dd>
++          <dt className="text-slate-600">Delivery</dt><dd>{p.shipmentCode}</dd>
++          <dt className="text-slate-600">Prawns</dt><dd>{p.request.species} · size {p.request.declaredSizeCount}</dd>
++          <dt className="text-slate-600">Quantity</dt><dd>{formatKg(inv.quantityKg)}<span className="block text-xs text-slate-500">{BASIS_TEXT[inv.quantityBasis]}</span></dd>
++          <dt className="text-slate-600">Rate</dt><dd>{formatInr(inv.ratePerKg)} per kg</dd>
++          <dt className="text-slate-600">Payment method</dt><dd>{inv.method ? PAYMENT_METHOD_LABELS[inv.method as keyof typeof PAYMENT_METHOD_LABELS] ?? inv.method : 'Not recorded'}</dd>
++          <dt className="text-slate-600">Reference</dt><dd>{inv.reference ?? '—'}</dd>
++          <dt className="text-slate-600">Paid by</dt><dd>{inv.paidBy}</dd>
++        </dl>
++        <div className="flex items-center justify-between border-t border-slate-200 pt-4"><span className="font-medium">Total paid</span><span className="text-2xl font-semibold">{formatInr(inv.amountInr)}</span></div>
++      </Card>
++    </div>
++  );
++}
+diff --git a/apps/web/src/pages/RequestDetailPage.tsx b/apps/web/src/pages/RequestDetailPage.tsx
+index 3e54e80..5204c43 100644
+--- a/apps/web/src/pages/RequestDetailPage.tsx
++++ b/apps/web/src/pages/RequestDetailPage.tsx
+@@ -5,6 +5,9 @@ import { AssignInspectionDialog, AssignTransportDialog } from '../components/Ass
+ import { ReasonDialog } from '../components/ReasonDialog';
+ import { Alert, Button, Card, Dialog, PageHeader, Pill, SelectField, Spinner, StatusBadge, TextAreaField, TextField } from '../components/ui';
+ import { useAmend, useCancel, useDecision, useRequest, useResubmit } from '../features/procurement/hooks';
++import { BoxPlanCard } from '../components/BoxPlanCard';
++import { PaymentLine } from '../components/PaymentParts';
++import { usePayments } from '../features/payments/hooks';
+ import { ApiError } from '../lib/api';
+ import { errorMessage } from '../lib/errors';
+ import { formatDateTime, formatFieldValue } from '../lib/format';
+@@ -16,6 +19,24 @@ import { formatKg } from '../lib/format';
+ import { CollectionStatusPill } from './CollectionPages';
+ import { InspectionStatusPill } from './InspectionPages';
+ 
++/** Box requirements can be set from approval until the shipment is received. */
++const BOX_PLAN_STATUSES: string[] = ['APPROVED', 'INSPECTION_ASSIGNED', 'INSPECTION_PASSED', 'INSPECTION_FAILED', 'INSPECTION_REVIEW', 'TRANSPORT_ASSIGNED', 'IN_TRANSIT', 'DELIVERED', 'RECEIVED'];
++
++/** Payment status for this request's delivery. Only appears once the prawns have reached the factory. */
++function RequestPayments({ requestId, manager }: { requestId: string; manager: boolean }) {
++  const q = usePayments({ requestId, pageSize: 5 });
++  if (!q.data || q.data.items.length === 0) return null;
++  return (
++    <Card>
++      <div className="flex items-center justify-between">
++        <h2 className="text-base font-semibold">Payment</h2>
++        {manager && q.data.items.some((p) => p.state === 'AWAITING_DECISION' || p.canSettle) && <Link className="text-sm font-medium text-teal-800 underline" to="/payments">Choose Pay Now or Pay Later</Link>}
++      </div>
++      <ul className="divide-y divide-slate-100">{q.data.items.map((p) => <PaymentLine key={p.shipmentId} p={p} />)}</ul>
++    </Card>
++  );
++}
++
+ function AmendDialog({ request, open, onClose }: { request: ProcurementRequest; open: boolean; onClose: () => void }) {
+   const amend = useAmend(request.id);
+   const [field, setField] = useState<AmendableField>('declaredQuantityKg');
+@@ -229,6 +250,8 @@ function buildTimeline(r: ProcurementRequest): TimelineItem[] {
+ 
+ export function RequestDetailPage() {
+   const { id } = useParams();
++  const { user } = useAuth();
++  const role = user?.role;
+   const { data: request, isLoading, isError, error } = useRequest(id);
+ 
+   if (isLoading) return <Spinner label="Loading request" />;
+@@ -258,6 +281,9 @@ export function RequestDetailPage() {
+         )}
+         {request.status === 'REJECTED' && request.lastStatusChange?.reason && <Alert tone="error">Rejected: {request.lastStatusChange.reason}</Alert>}
+ 
++        <RequestPayments requestId={request.id} manager={role === 'PURCHASE_MANAGER'} />
++        {(role === 'PURCHASE_MANAGER' || role === 'ADMIN') && BOX_PLAN_STATUSES.includes(request.status) && <BoxPlanCard requestId={request.id} canEdit={role === 'PURCHASE_MANAGER'} />}
++
+         <div className="grid gap-6 lg:grid-cols-3">
+           <Card className="lg:col-span-2">
+             <h2 className="mb-3 text-base font-semibold">Declaration</h2>
+diff --git a/apps/web/src/test/auth.test.tsx b/apps/web/src/test/auth.test.tsx
+index 7f874c6..c8e1b8e 100644
+--- a/apps/web/src/test/auth.test.tsx
++++ b/apps/web/src/test/auth.test.tsx
+@@ -84,16 +84,16 @@ describe('route protection and navigation', () => {
+ 
+   it('offers each role only its own navigation', () => {
+     const labels = (role: (typeof ROLES)[number]) => navItemsFor(role).map((i) => i.label);
+-    expect(labels('FARMER')).toEqual(['Dashboard', 'My requests', 'New request']);
++    expect(labels('FARMER')).toEqual(['Dashboard', 'My requests', 'New request', 'My payments']);
+     expect(labels('PURCHASE_MANAGER')).toEqual([
+-      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Exceptions', 'Slots',
++      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Grading & packing', 'Payments', 'Exceptions', 'Slots',
+     ]);
+     expect(labels('SECURITY_OFFICER')).toEqual(['Dashboard', 'Gate']);
+-    expect(labels('FACTORY_OPERATOR')).toEqual(['Dashboard', 'Shipments', 'Processing queue']);
+-    expect(labels('FIELD_OFFICER')).toEqual(['Dashboard', 'My inspections']);
++    expect(labels('FACTORY_OPERATOR')).toEqual(['Dashboard', 'Shipments', 'Processing queue', 'Grading & packing']);
++    expect(labels('FIELD_OFFICER')).toEqual(['Dashboard', 'My inspections', 'Collections to attend']);
+     expect(labels('TRANSPORT_OFFICER')).toEqual(['Dashboard', 'My collections']);
+     expect(labels('ADMIN')).toEqual([
+-      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Exceptions',
++      'Dashboard', 'Procurement requests', 'Inspections', 'Collections', 'Arrival schedule', 'Shipments', 'Processing queue', 'Grading & packing', 'Payments', 'Exceptions',
+       'Slots & stations', 'Vehicles', 'Users',
+     ]);
+     for (const role of ROLES.filter((r) => r !== 'ADMIN')) {
+diff --git a/apps/web/src/test/fieldwork.test.tsx b/apps/web/src/test/fieldwork.test.tsx
+index ab22c8d..7067963 100644
+--- a/apps/web/src/test/fieldwork.test.tsx
++++ b/apps/web/src/test/fieldwork.test.tsx
+@@ -115,7 +115,7 @@ describe('collection screen', () => {
+       ['ASSIGNED', 'Confirm pickup'], ['LOADED', 'Dispatch to factory'], ['DISPATCHED', 'Mark arrived at factory'], ['ARRIVED', 'Record handover'],
+     ];
+     for (const [status, label] of cases) {
+-      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status) }) });
++      api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture(status, { sealed: true }) }) });
+       const { unmount } = page();
+       expect(await screen.findByRole('button', { name: label })).toBeInTheDocument();
+       expect(screen.getAllByRole('button').filter((b) => /Confirm pickup|Dispatch to factory|Mark arrived|Record handover|Record loading/.test(b.textContent ?? ''))).toHaveLength(1);
+@@ -149,7 +149,7 @@ describe('collection screen', () => {
+   });
+ 
+   it('requires an expected arrival time to dispatch when none was set', async () => {
+-    api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture('LOADED', { expectedArrivalAt: null }) }) });
++    api('TRANSPORT_OFFICER', { 'GET /collections/c1': () => json(200, { data: collectionFixture('LOADED', { expectedArrivalAt: null, sealed: true }) }) });
+     page();
+     expect(await screen.findByRole('button', { name: 'Dispatch to factory' })).toBeDisabled();
+   });
+diff --git a/docs/API.md b/docs/API.md
+index 047cf10..ae89fdb 100644
+--- a/docs/API.md
++++ b/docs/API.md
+@@ -70,4 +70,33 @@ Invalid transitions return `409 INVALID_TRANSITION`. Every mutation of a request
+ 
+ ## Audit actions recorded
+ 
+-`auth.register`, `auth.login`, `auth.login_failed`, `auth.account_locked`, `auth.refresh_reuse_detected`, `auth.logout`, `user.create`, `user.update`, `user.access_change`, `admin.seed`, `procurement.submit`, `procurement.approve`, `procurement.reject`, `procurement.request_clarification`, `procurement.resubmit`, `procurement.cancel`, `procurement.amend`, `inspection.assign`, `inspection.start`, `inspection.complete`, `inspection.decision`, `inspection.cancel`, `collection.assign`, `collection.pickup`, `collection.load`, `collection.dispatch`, `collection.arrive`, `collection.handover`, `collection.photos_added`, `collection.seal`, `collection.incident`, `collection.cancel`, `vehicle.create`, `vehicle.update`, `slot.create`, `slot.update`, `booking.create`, `booking.reschedule`, `booking.cancel`, `booking.no_show`, `gate.arrive`, `gate.verify`, `gate.seal_mismatch`, `gate.hold`, `gate.releaseHold`, `gate.reject`, `gate.override`, `gate.admit`, `gate.exit`, `weight.record`, `weight.correct`, `shipment.receive`, `shipment.release`, `exception.raise`, `exception.note`, `exception.resolve`, `station.create`, `station.update`, `processing.start`, `processing.complete`.
++`auth.register`, `auth.login`, `auth.login_failed`, `auth.account_locked`, `auth.refresh_reuse_detected`, `auth.logout`, `user.create`, `user.update`, `user.access_change`, `admin.seed`, `procurement.submit`, `procurement.approve`, `procurement.reject`, `procurement.request_clarification`, `procurement.resubmit`, `procurement.cancel`, `procurement.amend`, `inspection.assign`, `inspection.start`, `inspection.complete`, `inspection.decision`, `inspection.cancel`, `collection.assign`, `collection.pickup`, `collection.load`, `collection.dispatch`, `collection.arrive`, `collection.handover`, `collection.photos_added`, `collection.seal`, `collection.incident`, `collection.cancel`, `vehicle.create`, `vehicle.update`, `slot.create`, `slot.update`, `booking.create`, `booking.reschedule`, `booking.cancel`, `booking.no_show`, `gate.arrive`, `gate.verify`, `gate.seal_mismatch`, `packing.plan_set`, `packing.boxes_added`, `packing.ids_assigned`, `packing.box_voided`, `packing.approved`, `payment.pay_now`, `payment.pay_later`, `payment.settled`, `gate.hold`, `gate.releaseHold`, `gate.reject`, `gate.override`, `gate.admit`, `gate.exit`, `weight.record`, `weight.correct`, `shipment.receive`, `shipment.release`, `exception.raise`, `exception.note`, `exception.resolve`, `station.create`, `station.update`, `processing.start`, `processing.complete`.
++
++
++## Grading, packing and boxes
++
++The purchase manager sets the box requirements of a purchase order; the factory packs only what is listed; the manager numbers each box and approves the packing.
++
++| Method | Path | Who | Notes |
++| --- | --- | --- | --- |
++| GET | `/packing/plans/:requestId` | Operator, Purchase Mgr, Admin | The order's box requirements |
++| PUT | `/packing/plans/:requestId` | Purchase Mgr | `{ lines: [{ form: HEAD_ON\|HEADLESS, sizeGrade: "10-20".."80-100", boxWeightKg, quantity }] }`. Lines that already have boxes cannot be removed |
++| GET | `/packing` | Operator, Purchase Mgr, Admin | Shipments in processing (`?state=open\|approved`) |
++| GET | `/packing/:shipmentId` | Operator, Purchase Mgr, Admin | Requirements with progress, boxes, summary |
++| POST | `/packing/:shipmentId/boxes` | Factory Operator | `{ requirementId, netWeightKg, count? }`. Weight must be within 2% of the ordered box weight and the count cannot exceed what is still needed |
++| POST | `/packing/:shipmentId/assign-ids` | Purchase Mgr | Gives every un-numbered box a unique `BOX-YYYY-NNNNNN` (optional `{ boxIds }`) |
++| POST | `/packing/:shipmentId/boxes/:boxId/void` | Purchase Mgr | `{ reason }`; a voided box stops counting |
++| POST | `/packing/:shipmentId/approve` | Purchase Mgr | Needs processing completed and all boxes numbered. If the order is short, `{ note }` is required |
++
++## Payments
++
++Available once the transport officer has handed the prawns over at the factory.
++
++| Method | Path | Who | Notes |
++| --- | --- | --- | --- |
++| GET | `/payments` | Farmer (own), Purchase Mgr, Admin | Delivered shipments with `state`: `AWAITING_DECISION`, `PAY_LATER`, `PAID` (`?state=`, `?requestId=`) |
++| GET | `/payments/:shipmentId` | Farmer (own), Purchase Mgr, Admin | Includes the invoice once paid |
++| POST | `/payments/:shipmentId/decide` | Purchase Mgr | `{ option: PAY_NOW\|PAY_LATER, method?, reference? }`. Pay Now creates the invoice immediately |
++| POST | `/payments/:shipmentId/settle` | Purchase Mgr | Pays a Pay Later delivery once processing is completed; creates the invoice |
++
++Invoice amount = quantity x rate, in exact integer arithmetic. Quantity is the factory's received net weight when recorded, otherwise the quantity the transport officer collected; the rate is the agreed price per kg.
+diff --git a/package-lock.json b/package-lock.json
+index 56e5fc5..c177395 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -135,7 +135,6 @@
+       "integrity": "sha512-RgHBCvtjbOK2gXSNBNIkNoEc9qoVEtau3hj8gEqKQuL3HZAibKarWFEI3Lfm6EYKkLalOh8eSrj9b+ch9H/VBA==",
+       "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "@babel/code-frame": "^7.29.7",
+         "@babel/generator": "^7.29.7",
+@@ -485,7 +484,6 @@
+         }
+       ],
+       "license": "MIT",
+-      "peer": true,
+       "engines": {
+         "node": ">=18"
+       },
+@@ -509,7 +507,6 @@
+         }
+       ],
+       "license": "MIT",
+-      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -533,6 +530,7 @@
+       "os": [
+         "aix"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -550,6 +548,7 @@
+       "os": [
+         "android"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -567,6 +566,7 @@
+       "os": [
+         "android"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -584,6 +584,7 @@
+       "os": [
+         "android"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -601,6 +602,7 @@
+       "os": [
+         "darwin"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -618,6 +620,7 @@
+       "os": [
+         "darwin"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -635,6 +638,7 @@
+       "os": [
+         "freebsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -652,6 +656,7 @@
+       "os": [
+         "freebsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -669,6 +674,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -686,6 +692,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -703,6 +710,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -720,6 +728,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -737,6 +746,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -754,6 +764,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -771,6 +782,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -788,6 +800,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -805,6 +818,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -822,6 +836,7 @@
+       "os": [
+         "netbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -839,6 +854,7 @@
+       "os": [
+         "netbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -856,6 +872,7 @@
+       "os": [
+         "openbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -873,6 +890,7 @@
+       "os": [
+         "openbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -890,6 +908,7 @@
+       "os": [
+         "openharmony"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -907,6 +926,7 @@
+       "os": [
+         "sunos"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -924,6 +944,7 @@
+       "os": [
+         "win32"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -941,6 +962,7 @@
+       "os": [
+         "win32"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -958,6 +980,7 @@
+       "os": [
+         "win32"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -1852,7 +1875,6 @@
+       "integrity": "sha512-yzr2S9HyAIdhz2/6qHgbs665Q7PKVcDF05vsOlHPxG1mo36gKVesdYVeDLnXgfjJ03CrKRk08knc6+E/9m8v2Q==",
+       "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "@babel/code-frame": "^7.10.4",
+         "@babel/runtime": "^7.12.5",
+@@ -2078,7 +2100,6 @@
+       "integrity": "sha512-sKYVuV7Sv9fbPIt/442koC7+IIwK5olP1KWeD88e/idgoJqDm3JV/YUiPwkoKK92ylff2MGxSz1CSjsXelx0YA==",
+       "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "@types/body-parser": "*",
+         "@types/express-serve-static-core": "^5.0.0",
+@@ -2177,7 +2198,6 @@
+       "integrity": "sha512-vfEqpXTvwT91yhmwdfouStN2hSKwTvyRs8qpLfADyrq/kxDw0hZM7Wk9Ug1FELj8hIby+S/+kQCSRFF32nv2Qw==",
+       "devOptional": true,
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "@types/prop-types": "*",
+         "csstype": "^3.2.2"
+@@ -2189,7 +2209,6 @@
+       "integrity": "sha512-MEe3UeoENYVFXzoXEWsvcpg6ZvlrFNlOQ7EOsvhI3CfAXwzPfO8Qwuxd40nepsYKqyyVQnTdEfv68q91yLcKrQ==",
+       "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "peerDependencies": {
+         "@types/react": "^18.0.0"
+       }
+@@ -2543,7 +2562,6 @@
+         }
+       ],
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "baseline-browser-mapping": "^2.11.29",
+         "caniuse-lite": "^1.0.30001816",
+@@ -3977,7 +3995,6 @@
+       "integrity": "sha512-Cvc9WUhxSMEo4McES3P7oK3QaXldCfNWp7pl2NNeiIFlCoLr3kfq9kb1fxftiwk1FLV7CvpvDfonxtzUDeSOPg==",
+       "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "cssstyle": "^4.2.1",
+         "data-urls": "^5.0.0",
+@@ -4874,7 +4891,6 @@
+       "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+       "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "engines": {
+         "node": ">=12"
+       },
+@@ -5001,7 +5017,6 @@
+       "devOptional": true,
+       "hasInstallScript": true,
+       "license": "Apache-2.0",
+-      "peer": true,
+       "dependencies": {
+         "@prisma/config": "6.19.3",
+         "@prisma/engines": "6.19.3"
+@@ -5147,7 +5162,6 @@
+       "resolved": "https://registry.npmjs.org/react/-/react-18.3.1.tgz",
+       "integrity": "sha512-wS+hAgJShR0KhEvPJArfuPVN1+Hz1t0Y6n5jLrGQbkb4urgPE/0Rve+1kMB1v/oWgHgm4WIcV+i7F2pTVj+2iQ==",
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "loose-envify": "^1.1.0"
+       },
+@@ -5160,7 +5174,6 @@
+       "resolved": "https://registry.npmjs.org/react-dom/-/react-dom-18.3.1.tgz",
+       "integrity": "sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==",
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "loose-envify": "^1.1.0",
+         "scheduler": "^0.23.2"
+@@ -5174,7 +5187,6 @@
+       "resolved": "https://registry.npmjs.org/react-hook-form/-/react-hook-form-7.90.0.tgz",
+       "integrity": "sha512-+NdG0FLzCPhFOp2NNxaUYLF9fyZhNjx9FTBBSYWF71/l6BBlmIc/j6xlp3DbaHWLJbIG7Zd8oznA19xJClU97w==",
+       "license": "MIT",
+-      "peer": true,
+       "engines": {
+         "node": ">=18.0.0"
+       },
+@@ -5931,7 +5943,6 @@
+       "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+       "devOptional": true,
+       "license": "Apache-2.0",
+-      "peer": true,
+       "bin": {
+         "tsc": "bin/tsc",
+         "tsserver": "bin/tsserver"
+@@ -6008,7 +6019,6 @@
+       "integrity": "sha512-xGjU/SyjeNyb0E4KxXBvYz/1C+3JXuujvf2hXNOtnlcE+58o5ajd9N2/n2VhkiJvpCP2qQasnUpx5PXNeI+p1Q==",
+       "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "dependencies": {
+         "esbuild": "^0.25.0",
+         "fdir": "^6.4.4",
+-- 
+2.43.0
+

@@ -294,10 +294,17 @@ export const arrive = (actor: AuthUser, id: string, ip: string | undefined) =>
   });
 
 export const handover = (actor: AuthUser, id: string, notes: string | undefined, ip: string | undefined) =>
-  step(actor, id, 'HANDED_OVER', 'collection.handover', ip, async () => ({
-    data: { handedOverAt: new Date(), handoverNotes: notes ? notes : null },
-    requestMove: 'DELIVERED',
-  }));
+  step(actor, id, 'HANDED_OVER', 'collection.handover', ip, async (tx, job) => {
+    // The hand-over is only possible after the security officer has verified the vehicle and seal and admitted it.
+    const shipment = await tx.shipment.findUnique({ where: { collectionJobId: job.id }, select: { status: true } });
+    if (!shipment) {
+      throw conflict('NOT_BOOKED', 'No arrival slot has been booked for this vehicle yet. The purchase manager must book one so the security officer can verify it at the gate.');
+    }
+    if (shipment.status !== 'ADMITTED') {
+      throw conflict('GATE_NOT_CLEARED', 'The security officer must verify and admit your vehicle at the gate before you can hand over.');
+    }
+    return { data: { handedOverAt: new Date(), handoverNotes: notes ? notes : null }, requestMove: 'DELIVERED' };
+  });
 
 /** Delays, damage and similar events are recorded as append-only incidents; they never alter measurements. */
 export async function reportIncident(actor: AuthUser, id: string, input: IncidentInput, ip: string | undefined) {

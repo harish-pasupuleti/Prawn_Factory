@@ -70,4 +70,33 @@ Invalid transitions return `409 INVALID_TRANSITION`. Every mutation of a request
 
 ## Audit actions recorded
 
-`auth.register`, `auth.login`, `auth.login_failed`, `auth.account_locked`, `auth.refresh_reuse_detected`, `auth.logout`, `user.create`, `user.update`, `user.access_change`, `admin.seed`, `procurement.submit`, `procurement.approve`, `procurement.reject`, `procurement.request_clarification`, `procurement.resubmit`, `procurement.cancel`, `procurement.amend`, `inspection.assign`, `inspection.start`, `inspection.complete`, `inspection.decision`, `inspection.cancel`, `collection.assign`, `collection.pickup`, `collection.load`, `collection.dispatch`, `collection.arrive`, `collection.handover`, `collection.photos_added`, `collection.seal`, `collection.incident`, `collection.cancel`, `vehicle.create`, `vehicle.update`, `slot.create`, `slot.update`, `booking.create`, `booking.reschedule`, `booking.cancel`, `booking.no_show`, `gate.arrive`, `gate.verify`, `gate.seal_mismatch`, `gate.hold`, `gate.releaseHold`, `gate.reject`, `gate.override`, `gate.admit`, `gate.exit`, `weight.record`, `weight.correct`, `shipment.receive`, `shipment.release`, `exception.raise`, `exception.note`, `exception.resolve`, `station.create`, `station.update`, `processing.start`, `processing.complete`.
+`auth.register`, `auth.login`, `auth.login_failed`, `auth.account_locked`, `auth.refresh_reuse_detected`, `auth.logout`, `user.create`, `user.update`, `user.access_change`, `admin.seed`, `procurement.submit`, `procurement.approve`, `procurement.reject`, `procurement.request_clarification`, `procurement.resubmit`, `procurement.cancel`, `procurement.amend`, `inspection.assign`, `inspection.start`, `inspection.complete`, `inspection.decision`, `inspection.cancel`, `collection.assign`, `collection.pickup`, `collection.load`, `collection.dispatch`, `collection.arrive`, `collection.handover`, `collection.photos_added`, `collection.seal`, `collection.incident`, `collection.cancel`, `vehicle.create`, `vehicle.update`, `slot.create`, `slot.update`, `booking.create`, `booking.reschedule`, `booking.cancel`, `booking.no_show`, `gate.arrive`, `gate.verify`, `gate.seal_mismatch`, `packing.plan_set`, `packing.boxes_added`, `packing.ids_assigned`, `packing.box_voided`, `packing.approved`, `payment.pay_now`, `payment.pay_later`, `payment.settled`, `gate.hold`, `gate.releaseHold`, `gate.reject`, `gate.override`, `gate.admit`, `gate.exit`, `weight.record`, `weight.correct`, `shipment.receive`, `shipment.release`, `exception.raise`, `exception.note`, `exception.resolve`, `station.create`, `station.update`, `processing.start`, `processing.complete`.
+
+
+## Grading, packing and boxes
+
+The purchase manager sets the box requirements of a purchase order; the factory packs only what is listed; the manager numbers each box and approves the packing.
+
+| Method | Path | Who | Notes |
+| --- | --- | --- | --- |
+| GET | `/packing/plans/:requestId` | Operator, Purchase Mgr, Admin | The order's box requirements |
+| PUT | `/packing/plans/:requestId` | Purchase Mgr | `{ lines: [{ form: HEAD_ON\|HEADLESS, sizeGrade: "10-20".."80-100", boxWeightKg, quantity }] }`. Lines that already have boxes cannot be removed |
+| GET | `/packing` | Operator, Purchase Mgr, Admin | Shipments in processing (`?state=open\|approved`) |
+| GET | `/packing/:shipmentId` | Operator, Purchase Mgr, Admin | Requirements with progress, boxes, summary |
+| POST | `/packing/:shipmentId/boxes` | Factory Operator | `{ requirementId, netWeightKg, count? }`. Weight must be within 2% of the ordered box weight and the count cannot exceed what is still needed |
+| POST | `/packing/:shipmentId/assign-ids` | Purchase Mgr | Gives every un-numbered box a unique `BOX-YYYY-NNNNNN` (optional `{ boxIds }`) |
+| POST | `/packing/:shipmentId/boxes/:boxId/void` | Purchase Mgr | `{ reason }`; a voided box stops counting |
+| POST | `/packing/:shipmentId/approve` | Purchase Mgr | Needs processing completed and all boxes numbered. If the order is short, `{ note }` is required |
+
+## Payments
+
+Available once the transport officer has handed the prawns over at the factory.
+
+| Method | Path | Who | Notes |
+| --- | --- | --- | --- |
+| GET | `/payments` | Farmer (own), Purchase Mgr, Admin | Delivered shipments with `state`: `AWAITING_DECISION`, `PAY_LATER`, `PAID` (`?state=`, `?requestId=`) |
+| GET | `/payments/:shipmentId` | Farmer (own), Purchase Mgr, Admin | Includes the invoice once paid |
+| POST | `/payments/:shipmentId/decide` | Purchase Mgr | `{ option: PAY_NOW\|PAY_LATER, method?, reference? }`. Pay Now creates the invoice immediately |
+| POST | `/payments/:shipmentId/settle` | Purchase Mgr | Pays a Pay Later delivery once processing is completed; creates the invoice |
+
+Invoice amount = quantity x rate, in exact integer arithmetic. Quantity is the factory's received net weight when recorded, otherwise the quantity the transport officer collected; the rate is the agreed price per kg.

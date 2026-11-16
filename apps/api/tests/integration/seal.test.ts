@@ -106,3 +106,21 @@ describe('seal check at the gate', () => {
     expect(locked.body.error.code).toBe('SEAL_LOCKED');
   });
 });
+
+describe('hand-over waits for the gate', () => {
+  it('the driver can only hand over after the security officer has verified and admitted the vehicle', async () => {
+    const a = await arrivedShipment(staff);
+    const handover = () => post(a.driverToken, `/collections/${a.collectionId}/handover`);
+    const refused = await handover();
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.code).toBe('GATE_NOT_CLEARED');
+
+    const path = `/bookings/${a.bookingId}`;
+    await post(fs.securityToken, `${path}/arrive`);
+    expect((await handover()).status).toBe(409); // arrived at the gate, but not verified or admitted
+    await post(fs.securityToken, `${path}/verify`, { registrationNumber: a.vehicle.registrationNumber, sealCode: a.sealCode });
+    expect((await handover()).status).toBe(409); // verified, but not admitted
+    await post(fs.securityToken, `${path}/admit`);
+    expect((await handover()).status).toBe(200);
+  });
+});

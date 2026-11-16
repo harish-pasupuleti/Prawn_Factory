@@ -469,3 +469,44 @@ export interface QueueEntry {
   notes: string | null;
   timer: Timer;
 }
+
+// ---------------------------------------------------------------- packing and payments
+export type BoxForm = 'HEAD_ON' | 'HEADLESS';
+export const BOX_FORM_LABELS: Record<BoxForm, string> = { HEAD_ON: 'Head-on', HEADLESS: 'Headless' };
+export const SIZE_GRADES = ['10-20', '20-30', '30-40', '40-50', '50-60', '60-70', '70-80', '80-100'] as const;
+export const sizeLabel = (grade: string) => grade.replace('-', '–');
+
+export interface BoxPlanLine { id?: string; form: BoxForm; sizeGrade: string; boxWeightKg: string; quantity: number }
+export interface PackingRequirement { id: string; form: BoxForm; sizeGrade: string; boxWeightKg: string; quantity: number; packed: number; remaining: number }
+export interface PackedBox {
+  id: string; requirementId: string; form: BoxForm; sizeGrade: string; netWeightKg: string; status: 'PACKED' | 'VOID';
+  boxNumber: string | null; numberedAt: string | null; voidReason: string | null; packedBy: string; packedAt: string;
+}
+export interface PackingSummary { requiredBoxes: number; packedBoxes: number; numberedBoxes: number; unnumberedBoxes: number; packedWeightKg: string; complete: boolean }
+export interface PackingStage { hasPlan: boolean; open: boolean; canApprove: boolean; approved: boolean }
+export interface PackingShipment { id: string; code: string; status: string; receivedNetKg: string | null; processing: string | null; packingApprovedAt: string | null; packingNote: string | null }
+export interface PackingDetail {
+  shipment: PackingShipment;
+  request: { id: string; code: string; species: string; declaredSizeCount: string; farmerName: string };
+  requirements: PackingRequirement[];
+  boxes: PackedBox[];
+  summary: PackingSummary;
+  stage: PackingStage;
+}
+export interface PackingListItem { shipment: PackingShipment; request: { id: string; code: string; species: string }; summary: PackingSummary; stage: PackingStage }
+
+export type PaymentState = 'AWAITING_DECISION' | 'PAY_LATER' | 'PAID';
+export const PAYMENT_METHODS = ['BANK_TRANSFER', 'UPI', 'CASH', 'CHEQUE'] as const;
+export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = { BANK_TRANSFER: 'Bank transfer', UPI: 'UPI', CASH: 'Cash', CHEQUE: 'Cheque' };
+export interface Invoice {
+  invoiceNumber: string; invoicedAt: string; paidAt: string; quantityKg: string; quantityBasis: 'FACTORY_WEIGHT' | 'COLLECTED_QUANTITY';
+  ratePerKg: string; amountInr: string; method: string | null; reference: string | null; paidBy: string; farmer: { name: string; email: string };
+}
+export interface PaymentRow {
+  shipmentId: string; shipmentCode: string;
+  request: { id: string; code: string; species: string; declaredSizeCount: string; farmerName?: string };
+  deliveredAt: string | null; state: PaymentState; option: 'PAY_NOW' | 'PAY_LATER' | null; processingCompleted: boolean; canSettle: boolean;
+  estimate: { quantityKg: string; quantityBasis: 'FACTORY_WEIGHT' | 'COLLECTED_QUANTITY'; ratePerKg: string; amountInr: string };
+  decidedAt: string | null; invoice: Invoice | null;
+}
